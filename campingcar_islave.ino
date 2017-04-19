@@ -9,12 +9,15 @@
 		*	programme de lecture des courants analogiques de batterie de cellule.
 		* 	0.0.1 - ecriture initiale menu et mise a l heure
 		* 	0.0.2 - affichage des acquisitions
+		* 	0.0.3 - affichage courants
+		* 	0.0.4 - entree A1 utilisée comme +- correcteur de gain (5 spires)
+		* 	0.0.5 - calcul de puissance et moyenne glissante
 		* 
 	*/
 
 // programme :
-const char title[] = "Acq data U-I-P";
-const char version[] = "0.2.0";
+const char title[] = "Acq_data_U-I-P";
+const char version[] = "0.0.5";
 
 #include <Arduino.h>
 #include "Timer.h"
@@ -46,6 +49,8 @@ const char version[] = "0.2.0";
 	#define scl	A5			// I2C rtc
 */
 
+#define ANALOG_COUNT 4
+
 const int ledPin = 8;			// the number of the LED pin
 const unsigned int BAUD_RATE = 19200 ;
 
@@ -54,8 +59,7 @@ const byte MY_ADDRESS = 12;
 const byte MASTER_ADDRESS = 11;
 
 // definition des parametres d entrees analogiques
-const int ANALOG_COUNT = 4;		// taille de la table de variables ana
-char* analog_name[ANALOG_COUNT] = {"V_ANA", "I_bat_cell", "I_bat_in", "i_aux"};
+char* analog_name[ANALOG_COUNT] = {"V_ANA", "I_bat_cell", "I_bat_in", "gain"};
 const int analog_pin[ANALOG_COUNT] = {0, 3, 2, 1};
 //les nombres sont multipliée par 100000 pour travailler avec des entiers
 const int analog_IMIN[ANALOG_COUNT] = { 0, -15, -15, -15};
@@ -65,7 +69,14 @@ const float bandgap_voltage = 1.1 ;		// this is not super guaranteed but its not
 const float vref = 12.62 ; // tension alim 25.24/2 ^^
 
 // Variables :
-bool sflag;   // caractere 's' reçu => mise a l heure
+bool sflag;   					// caractere 's' reçu => mise a l heure
+int s_freq = 12 ;				// nombre d acquisition par minute periode 5s = 12
+float ins[ ANALOG_COUNT ] ;		// registre stat de data 60 / s_freq = toute les n secondes
+float inm[ ANALOG_COUNT ] ;		// registre stat de data minute : moyenne ( cumul / s_freq )
+float inh[ANALOG_COUNT] [24] ;	// registre stat de data heure
+float pwm[2] [60] ;				// puissance moyenne / minute pour calculer la moyenne glissante
+float pwh[2] [24] ;				// puissance moyenne glissante en watt/heure
+
 Timer timber;
 
 //			****	sous programmes		****
@@ -82,35 +93,35 @@ unsigned int getInternal_1v1(void){
 }
 
 //print date and time to Serial
-void printDateTime(time_t t){
+/*void printDateTime(time_t t){
 	printDate(t);
 	Serial << ' ';
 	printTime(t);
 } // end of printDateTime
-
+*/
 //print time to Serial
-void printTime(time_t t){
+/*void printTime(time_t t){
 	printI00(hour(t), ':');
 	printI00(minute(t), ':');
 	printI00(second(t), ' ');
 } // end of printTime
-
+*/
 //print date to Serial
-void printDate(time_t t){
+/*void printDate(time_t t){
 	printI00(day(t), 0);
 	Serial << monthShortStr(month(t)) << _DEC(year(t));
 } // end of printDate
-
+*/
 //Print an integer in "00" format (with leading zero),
 //followed by a delimiter character to Serial.
 //Input value assumed to be between 0 and 99.
-void printI00(int val, char delim){
+/*void printI00(int val, char delim){
 	if (val < 10) Serial << '0';
 	Serial << _DEC(val);
 	if (delim > 0) Serial << delim;
 	return;
 } // end of printI00
-
+*/
 //set rtc time
 void set_rtcTime(){
 	//check for input to set the RTC, minimum length is 12, i.e. yy,m,d,h,m,s
@@ -171,7 +182,7 @@ void digitalClockDisplay(void){
 //printf(buffer,"Date\t%02d/%02d/%04d", jour, mois, annee);  //  %d pour un int
 //	console.println(buffer);
 //	sprintf(buffer,"Heure\t%02d:%02d:%02d", heure ,minutes ,secondes);  //  %d pour un int
-	Serial.println(buffer);
+	Serial.print(buffer);
 }
 
 /*float mapfloat(float x, float in_min, float in_max, float out_min, float out_max){
@@ -196,21 +207,29 @@ void analog_get(){
 		//analog_value[i] = map(val, 0, 1023, analog_IMIN[i], analog_IMAX[i]);
 		//float analog_val1 = mapfloat(val, 0, 1023, analog_IMIN[i], analog_IMAX[i]);
 		if ( i> 0){
-			analog_value[i] = (vref - (val * variable / analog_coef)) / 3 ;
+			analog_value[i] = vref - (val * variable / analog_coef);
 		}
 		else {
 			analog_value[i] = val * variable / analog_coef ;
 		}
-		Serial.print(analog_name[i]);
+		/*Serial.print(analog_name[i]);
 		Serial.print(" : ");
 		Serial.print(val) ;
 		Serial.print(" : ");
 		Serial.print(analog_value[i]);
-		//Serial.print(" | ");
-		//Serial.print(analog_val);
-		//Serial.print(" | ");
-		//Serial.print(analog_val1);
+			//Serial.print(" | ");
+			//Serial.print(analog_val);
+			//Serial.print(" | ");
+			//Serial.print(analog_val1);
 		Serial.print("\n");
+		*/
+	}
+	for(int i=1;i<=ANALOG_COUNT-2;i++){
+		analog_value[i] *= analog_value[3] ;
+		/*Serial.print(analog_name[i]);
+		Serial.print(" x gain : ");
+		Serial.println(analog_value[i]);
+		*/
 	}
 } // end of analog_get 
 
@@ -233,8 +252,14 @@ void receiveEvent (int howMany){
 //			****	fin des sous programmes		****
 
 void setup(void){
+
 	pinMode(ledPin, OUTPUT);
 	digitalWrite(ledPin, HIGH);   // turn the LED on (HIGH is the voltage level)
+	/*for(int i=0;i<=2;i++){
+		for(int j=0;j<=59;i++){
+			pwm[i][j] = 0 ;
+		}
+	}*/
 	// initialize serial:
 	Serial.begin(BAUD_RATE);
 	Serial.println();
@@ -263,15 +288,23 @@ void loop(void){
 	time_t t;
 	tmElements_t tm;
 
+/*
+int ins[ ANALOG_COUNT ] ;		// registre stat de data 60 / s_freq = toute les n secondes
+int inm[ ANALOG_COUNT ] ;		// registre stat de data minute : moyenne ( cumul / s_freq )
+int inh[ANALOG_COUNT] [24] ;	// registre stat de data heure
+int pwm[2] [60] ;				// puissance moyenne / minute pour calculer la moyenne glissante
+int pwh[2] [24] ;				// puissance moyenne glissante en watt/heure
+*/
+
 	if (sflag == false){
 		t = now();
 		if (t != tLast) {
 			tLast = t;
-			if (second(t) % 5 == 0 ) {
-			//if (second(t) == 0 or second(t) == 20 or second(t) == 40) {
+			if (second(t) % (60/s_freq) == 0 ) {
 				//printDateTime(t);
-				Serial.println() ;
-				digitalClockDisplay ();
+				//Serial.println() ;
+				//digitalClockDisplay ();
+				//Serial.print("  | ") ;
 				//timber.oscillate(ledPin, 500, LOW, 2);
 				timber.pulse(ledPin, 500, LOW);
 				/*float c = RTC.temperature() / 4.;
@@ -279,6 +312,57 @@ void loop(void){
 				Serial << F("  ") << c << F(" C  ") << f << F(" F");*/
 				//Serial << endl;
 				analog_get() ;
+				//Serial.print("V ana   | I cel | I deux |gain\n") ;
+				for(int i=0;i<=ANALOG_COUNT-1;i++){
+					ins[i] += analog_value[i] ;
+					/*Serial.print(ins[i]) ;
+					Serial.print(" | ") ;
+					*/
+				}
+				//Serial.println() ;
+			}
+			if (second(t) == 0) {				// calculs des mesures moyenne / minute
+				digitalClockDisplay ();
+				Serial.print("  | ") ;
+				//Serial.print(F("calcul de la minute : \n")) ;
+				for(int i=0;i<=ANALOG_COUNT-1;i++){
+					inm[i] = ins[i]  / s_freq ;
+					Serial.print(inm[i]) ;
+					Serial.print(" | ") ;
+					ins[i] = 0 ;
+				}
+				Serial.print("------------") ;
+				for(int i=1;i<=2;i++){			// calcul de la moyenne glissante de puissance
+					if (i == 1 ){
+						pwm[i -1] [minute(t)] = inm[0] * inm[1];
+					}
+					else if (i == 2 ){
+						pwm[i -1] [minute(t)] = inm[0] * inm[1] * inm[3] ;
+					}
+					Serial.print("|") ;
+					Serial.print(pwm[i -1] [minute(t)]);
+					Serial.print("|") ;
+				}
+				Serial.print("\n") ;
+				for(int i=0;i<=1;i++){
+					int num = 0 ;
+					for(int j=0;j<=59;j++){			// calcul de la moyenne glissante de puissance 
+						if (pwm[i] [j] != 0 ){
+							num +=1 ;
+							pwh[i] [hour()] += pwm[i] [j] ;
+						}
+					}
+					pwh[i] [hour()] = pwh[i] [hour()] / num ;
+				}
+				
+				//Serial.print("\n") ;
+				for(int j=0;j<=1;j++){
+					for(int i=0;i<=24-1;i++){
+						Serial.print("|") ;
+						Serial.print(pwh[j] [i]);
+					}
+					Serial.print("\n") ;
+				}
 			}
 		}
 		timber.update();	// mise à jour du timer*/
