@@ -11,13 +11,15 @@
 		* 	0.0.2 - affichage des acquisitions
 		* 	0.0.3 - affichage courants
 		* 	0.0.4 - entree A1 utilisée comme +- correcteur de gain (5 spires)
-		* 	0.0.5 - calcul de puissance et moyenne glissante
+M		* 	0.0.5 - calcul de puissance et moyenne glissante float
+D		* 	0.0.6 - calcul moyenne glissante = somme -vieux + nouveau / nombre
+		* 	0.0.7 - conversion des floats en long virgule fixe
 		* 
 	*/
 
 // programme :
 const char title[] = "Acq_data_U-I-P";
-const char version[] = "0.0.5";
+const char version[] = "0.0.6";
 
 #include <Arduino.h>
 #include "Timer.h"
@@ -62,11 +64,14 @@ const byte MASTER_ADDRESS = 11;
 char* analog_name[ANALOG_COUNT] = {"V_ANA", "I_bat_cell", "I_bat_in", "gain"};
 const int analog_pin[ANALOG_COUNT] = {0, 3, 2, 1};
 //les nombres sont multipliée par 100000 pour travailler avec des entiers
-const int analog_IMIN[ANALOG_COUNT] = { 0, -15, -15, -15};
-const int analog_IMAX[ANALOG_COUNT] = { 15, 15, 15, 15};
+const int analog_IMIN[ANALOG_COUNT] = { 0, -16, -16, -16};
+const int analog_IMAX[ANALOG_COUNT] = { 15, 16, 16, 16};
 float analog_value[ANALOG_COUNT];
 const float bandgap_voltage = 1.1 ;		// this is not super guaranteed but its not -too- off
-const float vref = 12.62 ; // tension alim 25.24/2 ^^
+const float vref = 12.60 ;		// tension alim 25.24/2 ^^
+const int refcan = 512 ;		// pas can a mis plage 0amp
+const int offset = 104 ;		// conpensation ecart a 0amp
+const float gain = 1.15 ;		// gain de correction ana
 
 // Variables :
 bool sflag;   					// caractere 's' reçu => mise a l heure
@@ -76,54 +81,71 @@ float inm[ ANALOG_COUNT ] ;		// registre stat de data minute : moyenne ( cumul /
 float inh[ANALOG_COUNT] [24] ;	// registre stat de data heure
 float pwm[2] [60] ;				// puissance moyenne / minute pour calculer la moyenne glissante
 float pwh[2] [24] ;				// puissance moyenne glissante en watt/heure
-
+float pwmsigma[2] ;				// somme des puissances/minutes
 Timer timber;
 
 //			****	sous programmes		****
 
 void(* resetFunc) (void) = 0; //declare reset function @ address 0
 
+/** Mesure entree ANA avec la référence interne à 1.1 volts */
+unsigned int analogReadPin(byte pin) {
+
+	/* Sélectionne l entee ADC avec la référence interne à 1.1 volts */
+	//ADMUX = bit (REFS0) | bit (REFS1)  | pin;    // input pin
+	ADMUX = bit (REFS0) | pin ;    // input pin
+	delay (200);  // let it stabilize
+ 
+
+	/* Active le convertisseur analogique -> numérique */
+	ADCSRA |= (1 << ADEN);
+
+	/* Lance une conversion analogique -> numérique */
+	ADCSRA |= (1 << ADSC);
+
+	/* Attend la fin de la conversion */
+	while(ADCSRA & (1 << ADSC));
+
+	/* Récupère le résultat de la conversion */
+	return ADCL | (ADCH << 8);
+}
+
+/** Mesure la référence interne à 1.1 volts */
+unsigned int analogReadReference(void) {
+
+	/* Elimine toutes charges résiduelles */
+	ADMUX = 0x4F;
+	delayMicroseconds(5);
+
+	/* Sélectionne la référence interne à 1.1 volts comme point de mesure, avec comme limite haute VCC */
+	ADMUX = 0x4E;
+	delayMicroseconds(200);
+
+	/* Active le convertisseur analogique -> numérique */
+	ADCSRA |= (1 << ADEN);
+
+	/* Lance une conversion analogique -> numérique */
+	ADCSRA |= (1 << ADSC);
+
+	/* Attend la fin de la conversion */
+	while(ADCSRA & (1 << ADSC));
+
+	/* Récupère le résultat de la conversion */
+	return ADCL | (ADCH << 8);
+}
+
 /* Mesure la référence interne à 1v1 de l'ATmega */
 unsigned int getInternal_1v1(void){
 	ADMUX = 0x4E;					// Sélectionne la référence interne à 1v1 comme point de mesure, avec comme limite haute VCC
+	delayMicroseconds(200);
+	ADCSRA |= bit (ADPS0) |  bit (ADPS1) | bit (ADPS2);  // Prescaler of 128
 	ADCSRA |= (1 << ADEN);			// Active le convertisseur analogique -> numérique
 	ADCSRA |= (1 << ADSC);			// Lance une conversion analogique -> numérique
 	while(ADCSRA & (1 << ADSC));	// Attend la fin de la conversion
 	return ADCL | (ADCH << 8);		// Récupère le résultat de la conversion
 }
 
-//print date and time to Serial
-/*void printDateTime(time_t t){
-	printDate(t);
-	Serial << ' ';
-	printTime(t);
-} // end of printDateTime
-*/
-//print time to Serial
-/*void printTime(time_t t){
-	printI00(hour(t), ':');
-	printI00(minute(t), ':');
-	printI00(second(t), ' ');
-} // end of printTime
-*/
-//print date to Serial
-/*void printDate(time_t t){
-	printI00(day(t), 0);
-	Serial << monthShortStr(month(t)) << _DEC(year(t));
-} // end of printDate
-*/
-//Print an integer in "00" format (with leading zero),
-//followed by a delimiter character to Serial.
-//Input value assumed to be between 0 and 99.
-/*void printI00(int val, char delim){
-	if (val < 10) Serial << '0';
-	Serial << _DEC(val);
-	if (delim > 0) Serial << delim;
-	return;
-} // end of printI00
-*/
-//set rtc time
-void set_rtcTime(){
+void set_rtcTime(){		//set rtc time
 	//check for input to set the RTC, minimum length is 12, i.e. yy,m,d,h,m,s
 	//note that the tmElements_t Year member is an offset from 1970,
 	//but the RTC wants the last two digits of the calendar year.
@@ -157,8 +179,7 @@ void set_rtcTime(){
 	}
 } // end of set_rtcTime
 
-//send list of variables
-char* send_list(){
+char* send_list(){		//send list of variables
 	char liste [30];
 	strcpy (liste, analog_name[0]) ;
 	for(int i= 1;i<=ANALOG_COUNT-1;i++){
@@ -185,10 +206,10 @@ void digitalClockDisplay(void){
 	Serial.print(buffer);
 }
 
-/*float mapfloat(float x, float in_min, float in_max, float out_min, float out_max){
+float mapfloat(float x, float in_min, float in_max, float out_min, float out_max){
  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
-*/
+
 
 void analog_get(){
 
@@ -196,41 +217,81 @@ void analog_get(){
 	float variable;
 
 	val = getInternal_1v1() ;
-	// variable affecte a real_vcc
+	int reference = analogReadReference();
+	float tension_alim = (1023 * 1.1) / analogReadReference();
+  	// variable affecte a real_vcc
 	variable = 1023 * bandgap_voltage / val ;
-
+	Serial.print("reference : ");
+	Serial.print(reference) ;
+	Serial.print(" | alim : ");
+	Serial.print(tension_alim) ;
+	Serial.print(" | refcan 1.1v : ");
+	Serial.print(val) ;
+	Serial.print("| real vcc : ");
+	Serial.println(variable) ;
+		
 	for(int i=0;i<=ANALOG_COUNT-1;i++){
 
 		float analog_coef = 1023 / (analog_IMAX[i] - analog_IMIN[i]) * variable;
 		val = analogRead(analog_pin[i]);
-		//float analog_val = val * variable / analog_coef;
-		//analog_value[i] = map(val, 0, 1023, analog_IMIN[i], analog_IMAX[i]);
-		//float analog_val1 = mapfloat(val, 0, 1023, analog_IMIN[i], analog_IMAX[i]);
+		/*float analog_val = val * variable / analog_coef;
+		analog_value[i] = map(val, 0, 1023, analog_IMIN[i], analog_IMAX[i]);
+		*/
+		/** cet appel de fonction marche */
+		//float analog_val1 = mapfloat(val - offset, 0, 1023, analog_IMIN[i], analog_IMAX[i]);
+		
+		
+/*		pour memoire
 		if ( i> 0){
 			analog_value[i] = vref - (val * variable / analog_coef);
 		}
 		else {
 			analog_value[i] = val * variable / analog_coef ;
 		}
-		/*Serial.print(analog_name[i]);
-		Serial.print(" : ");
+*/
+		if ( i> 0){
+			//analog_value[i] = ((val - refcan - offset )  * variable ) / analog_coef;
+			analog_value[i] = mapfloat(val - offset, 0, 1023, analog_IMAX[i], analog_IMIN[i]) * gain;
+		}
+		else {
+			//analog_value[i] = val * variable / analog_coef ;
+			analog_value[i] = mapfloat(val, 0, 1023, analog_IMIN[i], analog_IMAX[i]);
+		}
+		// conversion int2byte -> utilisation du pointer de lowbyte du int
+		byte bint[2] ;
+		bint[0] = (byte) analog_pin[i] ;
+		Serial.print("i : ");
+		Serial.print(bint[0]) ;
+		Serial.print(" | ");
+		int pascan = analogReadPin(bint[0]);
+		Serial.print(analog_name[i]);
+		Serial.print(" |val : ");
 		Serial.print(val) ;
-		Serial.print(" : ");
+		//Serial.print(" |pascan : ");
+		//Serial.print(pascan) ;
+		Serial.print(" |refcan : ");
+		Serial.print(refcan) ;
+		Serial.print(" |variable : ");
+		Serial.print(variable) ;
+		Serial.print(" |analog_coef : ");
+		Serial.print(analog_coef) ;
+		Serial.print(" |analog_value : ");
 		Serial.print(analog_value[i]);
-			//Serial.print(" | ");
-			//Serial.print(analog_val);
+		//Serial.print(" |analog_val1 : ");
+		//Serial.print(analog_val1);
 			//Serial.print(" | ");
 			//Serial.print(analog_val1);
 		Serial.print("\n");
-		*/
+		
 	}
+	/* correction de la valeur du courant par le gain * entree 3
 	for(int i=1;i<=ANALOG_COUNT-2;i++){
 		analog_value[i] *= analog_value[3] ;
-		/*Serial.print(analog_name[i]);
+		Serial.print(analog_name[i]);
 		Serial.print(" x gain : ");
 		Serial.println(analog_value[i]);
-		*/
-	}
+		
+	}*/
 } // end of analog_get 
 
 void receiveEvent (int howMany){
@@ -254,14 +315,17 @@ void receiveEvent (int howMany){
 void setup(void){
 
 	pinMode(ledPin, OUTPUT);
-	digitalWrite(ledPin, HIGH);   // turn the LED on (HIGH is the voltage level)
-	/*for(int i=0;i<=2;i++){
-		for(int j=0;j<=59;i++){
-			pwm[i][j] = 0 ;
+	digitalWrite(ledPin, HIGH);		// turn the LED on (HIGH is the voltage level)
+	/*ADCSRA =  bit (ADEN);   // turn ADC on
+	ADCSRA |= bit (ADPS0) |  bit (ADPS1) | bit (ADPS2);  // Prescaler of 128
+	ADMUX = bit (REFS0) | bit (MUX3) | bit (MUX2) | bit (MUX1);
+	ADMUX = bit (REFS0) | bit (REFS1);  // Internal 1.1V reference*/
+	for(int i=0;i<=1;i++){
+		for(int j=0;j<=59;j++){			// calcul de la moyenne glissante de puissance 
+			pwm[i] [j] = 0 ;
 		}
-	}*/
-	// initialize serial:
-	Serial.begin(BAUD_RATE);
+	}
+	Serial.begin(BAUD_RATE);		// initialize serial:
 	Serial.println();
 	Serial.print(title);
 	Serial.print(F(" "));
@@ -269,7 +333,6 @@ void setup(void){
 	//setSyncProvider() causes the Time library to synchronize with the
 	//external RTC by calling RTC.get() every five minutes by default.
 	setSyncProvider(RTC.get);
-	//Serial << F("RTC Sync");
 	if (timeStatus() != timeSet){
 		Serial.print(F(" FAIL remote RTC!\n"));
 	}
@@ -278,7 +341,6 @@ void setup(void){
 	Serial.print(F("i2c en reception port :"));
 	Serial.print(MY_ADDRESS);
 	Serial.print(F("\n"));
-	digitalWrite(ledPin, LOW);   // turn the LED off (LOW is the voltage level)
 	timber.oscillate(ledPin, 100, LOW, 10);
 
 } // end of setup
@@ -300,20 +362,14 @@ int pwh[2] [24] ;				// puissance moyenne glissante en watt/heure
 		t = now();
 		if (t != tLast) {
 			tLast = t;
-			if (second(t) % (60/s_freq) == 0 ) {
-				//printDateTime(t);
-				//Serial.println() ;
+			if (second(t) % (60/s_freq) == 0 ) {		//acquisition des mesures
 				//digitalClockDisplay ();
 				//Serial.print("  | ") ;
 				//timber.oscillate(ledPin, 500, LOW, 2);
 				timber.pulse(ledPin, 500, LOW);
-				/*float c = RTC.temperature() / 4.;
-				float f = c * 9. / 5. + 32.;
-				Serial << F("  ") << c << F(" C  ") << f << F(" F");*/
-				//Serial << endl;
 				analog_get() ;
 				//Serial.print("V ana   | I cel | I deux |gain\n") ;
-				for(int i=0;i<=ANALOG_COUNT-1;i++){
+				for(int i=0;i<=ANALOG_COUNT-1;i++){		// cumul des acquisitions
 					ins[i] += analog_value[i] ;
 					/*Serial.print(ins[i]) ;
 					Serial.print(" | ") ;
@@ -321,41 +377,40 @@ int pwh[2] [24] ;				// puissance moyenne glissante en watt/heure
 				}
 				//Serial.println() ;
 			}
-			if (second(t) == 0) {				// calculs des mesures moyenne / minute
+			if (second(t) == 0) {						// calculs des mesures moyenne / minute
 				digitalClockDisplay ();
 				Serial.print("  | ") ;
 				//Serial.print(F("calcul de la minute : \n")) ;
 				for(int i=0;i<=ANALOG_COUNT-1;i++){
-					inm[i] = ins[i]  / s_freq ;
+					inm[i] = ins[i]  / s_freq ;			// acquisition minute = cumul / frequence d'acquisition
 					Serial.print(inm[i]) ;
 					Serial.print(" | ") ;
 					ins[i] = 0 ;
 				}
-				Serial.print("------------") ;
-				for(int i=1;i<=2;i++){			// calcul de la moyenne glissante de puissance
-					if (i == 1 ){
-						pwm[i -1] [minute(t)] = inm[0] * inm[1];
-					}
-					else if (i == 2 ){
-						pwm[i -1] [minute(t)] = inm[0] * inm[1] * inm[3] ;
-					}
+				Serial.print(F("  ")) ;
+				/*for(int i=1;i<=2;i++){			// calcul de la puissance moyenne / minute
+					pwm[i -1] [minute(t)] = inm[0] * inm[1];
 					Serial.print("|") ;
 					Serial.print(pwm[i -1] [minute(t)]);
 					Serial.print("|") ;
 				}
 				Serial.print("\n") ;
+				*/
 				for(int i=0;i<=1;i++){
-					int num = 0 ;
-					for(int j=0;j<=59;j++){			// calcul de la moyenne glissante de puissance 
-						if (pwm[i] [j] != 0 ){
-							num +=1 ;
-							pwh[i] [hour()] += pwm[i] [j] ;
-						}
-					}
-					pwh[i] [hour()] = pwh[i] [hour()] / num ;
+					// puissance moyenne / horaire - ( pw vielle minute )
+					pwmsigma[i] = pwmsigma[i] - pwm[i] [minute(t)] ;
+					// calcul de la puissance moyenne / nouvelle minute
+					pwm[i] [minute(t)] = inm[0] * inm[i +1];
+					Serial.print(F("|pw/min = ")) ;
+					Serial.print(pwm[i] [minute(t)]);
+					// puissance moyenne / horaire + ( pw nouvelle minute )
+					pwmsigma[i] = pwmsigma[i] + pwm[i] [minute(t)] ;
+					pwh[i] [hour()] = pwmsigma[i] / 60 ;
+					Serial.print(F("|pwmoy/h = ")) ;
+					Serial.print(pwmsigma[i] /60) ;
 				}
 				
-				//Serial.print("\n") ;
+				Serial.print("\n") ;
 				for(int j=0;j<=1;j++){
 					for(int i=0;i<=24-1;i++){
 						Serial.print("|") ;
