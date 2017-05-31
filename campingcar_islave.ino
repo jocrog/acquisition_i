@@ -15,11 +15,12 @@
 M		* 	0.0.6 - calcul moyenne glissante = somme -vieux + nouveau / nombre
 		* 	0.0.7 - envoi de donnee modele csv
 		* 	0.0.8 - envoi de float sur wire
+D		* 	0.0.9 - correction A/h au lieu de W/h 
 	*/
 
 // programme :
 const char title[] = "Acq_data_U-I-P";
-const char version[] = "0.0.8";
+const char version[] = "0.0.9";
 
 #include <Arduino.h>
 #include "Timer.h"
@@ -64,35 +65,35 @@ const int MY_ADDRESS = 12;
 const int MASTER_ADDRESS = 11;
 
 	// definition des parametres d entrees analogiques ( 1 voie)
-char* analog_name[ANALOG_COUNT] = {"VBAT", "IBAT" } ; //, "I_ext", "opt"};
-char* pw_name[ANALOG_COUNT] = {"PwM", "PwH" } ; //, "1Pw_Min", "1PwH_moy"};
+char* analog_name[ANALOG_COUNT] = {"VBat", "IBat" } ; //, "I_ext", "opt"};
+char* ia_name[ANALOG_COUNT] = {"Am", "Ah" } ; //, "1ia_Min", "1iaH_moy"};
 //const byte analog_pin[ANALOG_COUNT] = {0, 3} ; //, 2, 1};
 const byte analog_pin[ANALOG_COUNT] = {0, 2} ; //, 3, 1};
 	//les nombres sont à multiplier par 2puissance23 pour travailler avec des entiers
-const int analog_IMIN[ANALOG_COUNT] = { 0, -16 } ; //, -16, -16};
-const int analog_IMAX[ANALOG_COUNT] = { 15, 16 } ; //, 16, 16};
-float analog_value[ANALOG_COUNT];
-const float bandgap_voltage = 1.1 ;	// this is not super guaranteed but its not -too- off
+const long analog_IMIN[ANALOG_COUNT] = { 0, -16000 } ; //, -16, -16};
+const long analog_IMAX[ANALOG_COUNT] = { 15000, 16000 } ; //, 16, 16};
+long analog_value[ANALOG_COUNT];
+int offset[ANALOG_COUNT] = {0, -105} ;		// offset pascan conpensation ecart a 0amp
+int gain[ANALOG_COUNT] = {115, 115} ;		// gain de correction ana
+//const float bandgap_voltage = 1.1 ;	// this is not super guaranteed but its not -too- off
 	//float vref = 12.600 ;		// tension alim 25.24/2  actuellement non utilisé
 	//const int refcan = 512 ;		// pas can a demi plage 0amp actuellement non utilisé
-int offset = 104 ;		// offset pascan conpensation ecart a 0amp
-float gain = 1.15 ;		// gain de correction ana
 
 // Variables :
 bool sflag;   					// caractere 's' reçu => mise a l heure
-int s_freq = 12 ;				// nombre d acquisition par minute periode 5s = 12
-float ins[ ANALOG_COUNT ] ;		// registre stat de data 60 / s_freq = toute les n secondes
-float inm[ ANALOG_COUNT ] ;		// registre stat de data minute : moyenne ( cumul / s_freq )
-float inh[ANALOG_COUNT] [24] ;	// registre stat de data heure
-	/*float pwm[2] [60] ;				// puissance moyenne / minute pour calculer la moyenne glissante
-	float pwh[2] [24] ;					// puissance moyenne glissante en watt/heure
-	float pwmsigma[2] ;					// somme des puissances/minutes
+int s_freq = 10 ;				// nombre d acquisition par minute periode 6s = 10
+//long ins[ ANALOG_COUNT ] ;		// registre stat de data 60 / s_freq = toute les n secondes
+long inm[ ANALOG_COUNT ] ;		// registre stat de data minute : moyenne ( cumul / s_freq )
+long inh[ANALOG_COUNT] [24] ;	// registre stat de data heure
+	/*float iam[2] [60] ;				// puissance moyenne / minute pour calculer la moyenne glissante
+	float iah[2] [24] ;					// puissance moyenne glissante en watt/heure
+	float iamsigma[2] ;					// somme des puissances/minutes
 	** utilisé pour 2 voie de calcul de puissance */
-float pwm[60] ;					// puissance moyenne / minute pour calculer la moyenne glissante
-float pwh[24] ;					// puissance moyenne glissante en watt/heure
-float pwmsigma ;				// somme des puissances/minutes
-const int maxpwh = 200 ;		// capacité max batterie
-float cumulpwh ;				// cumul energie
+long iam[60] ;					// puissance moyenne / minute pour calculer la moyenne glissante
+long iah[24] ;					// puissance moyenne glissante en watt/heure
+long iamsigma ;				// somme des puissances/minutes
+const int maxiah = 200000 ;		// capacité max batterie
+long cumuliah ;				// cumul energie
 int minut ;						// index minute actuelle
 Timer timber;
 
@@ -103,9 +104,9 @@ enum {
 	CMD_LIST = 2,
 	CMD_READ_VBAT = 3,
 	CMD_READ_IBAT = 4,
-	CMD_READ_PWM = 5,
-	CMD_READ_PWH = 6,
-	CMD_READ_CUMULPW = 7,
+	CMD_READ_IAM = 5,
+	CMD_READ_IAH = 6,
+	CMD_READ_CUMULIA = 7,
 	CMD_ID = 9
 	};
 
@@ -118,58 +119,18 @@ void(* resetFunc) (void) = 0; //declare reset function @ address 0
 /** Mesure entree ANA avec la référence interne à 1.1 volts */
 unsigned int analogReadPin(byte pin) {
 
-	/* Sélectionne l entee ADC avec la référence interne à 1.1 volts */
+	/** Sélectionne l entee ADC avec la référence interne à 1.1 volts */
 	//ADMUX = bit (REFS0) | bit (REFS1)  | pin;    // input pin
 	ADMUX = bit (REFS0) | pin ;    // input pin
 	delay (200);  // let it stabilize
- 
-
-	/* Active le convertisseur analogique -> numérique */
+	/** Active le convertisseur analogique -> numérique **/
 	ADCSRA |= (1 << ADEN);
-
-	/* Lance une conversion analogique -> numérique */
+	/** Lance une conversion analogique -> numérique **/
 	ADCSRA |= (1 << ADSC);
-
-	/* Attend la fin de la conversion */
+	/** Attend la fin de la conversion **/
 	while(ADCSRA & (1 << ADSC));
-
-	/* Récupère le résultat de la conversion */
+	/** Récupère le résultat de la conversion **/
 	return ADCL | (ADCH << 8);
-}
-
-/** Mesure la référence interne à 1.1 volts */
-unsigned int analogReadReference(void) {
-
-	/* Elimine toutes charges résiduelles */
-	ADMUX = 0x4F;
-	delayMicroseconds(5);
-
-	/* Sélectionne la référence interne à 1.1 volts comme point de mesure, avec comme limite haute VCC */
-	ADMUX = 0x4E;
-	delayMicroseconds(200);
-
-	/* Active le convertisseur analogique -> numérique */
-	ADCSRA |= (1 << ADEN);
-
-	/* Lance une conversion analogique -> numérique */
-	ADCSRA |= (1 << ADSC);
-
-	/* Attend la fin de la conversion */
-	while(ADCSRA & (1 << ADSC));
-
-	/* Récupère le résultat de la conversion */
-	return ADCL | (ADCH << 8);
-}
-
-/** Mesure la référence interne à 1v1 de l'ATmega */
-unsigned int getInternal_1v1(void){
-	ADMUX = 0x4E;					// Sélectionne la référence interne à 1v1 comme point de mesure, avec comme limite haute VCC
-	delayMicroseconds(200);
-	ADCSRA |= bit (ADPS0) |  bit (ADPS1) | bit (ADPS2);  // Prescaler of 128
-	ADCSRA |= (1 << ADEN);			// Active le convertisseur analogique -> numérique
-	ADCSRA |= (1 << ADSC);			// Lance une conversion analogique -> numérique
-	while(ADCSRA & (1 << ADSC));	// Attend la fin de la conversion
-	return ADCL | (ADCH << 8);		// Récupère le résultat de la conversion
 }
 
 void set_rtcTime(){		//set rtc time
@@ -221,10 +182,10 @@ byte send_labels(char *liste){		//send list of variables
 		strcat(liste, ",");
 	}
 	for(int i= 0;i<=ANALOG_COUNT-1;i++){
-		strcat(liste, pw_name[i]);
+		strcat(liste, ia_name[i]);
 		strcat(liste, ",");
 	}
-	strcat(liste, "cumulpwh");
+	strcat(liste, "cumulah");
 	strcat(liste, ",");
 	strcat(liste, "\n");
 	return strlen(liste);
@@ -242,7 +203,7 @@ char* send_data(){		//send list of variables
 		strcat(liste, ",");
 	}
 	for(int i= 0;i<=ANALOG_COUNT-1;i++){
-		strcat(liste, pw_name[i]);
+		strcat(liste, ia_name[i]);
 		strcat(liste, ",");
 	}
 	strcat(liste, "\n");
@@ -265,93 +226,30 @@ char* digitalClockDisplay(char* buffer){
 	return buffer ;
 }
 
-float mapfloat(float x, float in_min, float in_max, float out_min, float out_max){
- return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
-}
+void analog_convert(){	//conversion de 10 acquisitions pascan / minutes
 
-
-void analog_get(){
-
-	unsigned int val;
-	int variable;
-	val = getInternal_1v1() ;
-	//int reference = analogReadReference();
-	//float tension_alim = (1024 * 1.1) / analogReadReference();
-  	// variable affecte a real_vcc
-	variable = 1024 * bandgap_voltage / val ;
-	/*Serial.print("reference : ");
-	Serial.print(reference) ;
-	Serial.print(" | alim : ");
-	Serial.print(tension_alim) ;
-	Serial.print(" | refcan 1.1v : ");
-	Serial.print(val) ;
-	Serial.print("| real vcc : ");
-	Serial.println(variable) ;
-	*/
 	for(int i=0;i<=ANALOG_COUNT-1;i++){
+		if ( i> 0){
+			inm[i] = map(analog_value[i] , 0, 10240, analog_IMAX[i], analog_IMIN[i]) * gain[i] / 100;
+		}
+		else {
+			inm[i] = map(analog_value[i] , 0, 10240, analog_IMIN[i], analog_IMAX[i]);
+		}
+		Serial.println(inm[i]) ;
 
-		float analog_coef = 1024 / (analog_IMAX[i] - analog_IMIN[i]) * variable;
-		//val = analogRead(analog_pin[i]);
-		val = analogReadPin(analog_pin[i]);
-		/*float analog_val = val * variable / analog_coef;
-		analog_value[i] = map(val +0.5 , 0, 1024, analog_IMIN[i], analog_IMAX[i]);
-		*/
-		/** cet appel de fonction marche 
-		float analog_val1 = mapfloat(val - offset, 0, 1024, analog_IMIN[i], analog_IMAX[i]);
-		** ancienne conversion pour memoire
-		if ( i> 0){
-			analog_value[i] = vref - (val * variable / analog_coef);
-		}
-		else {
-			analog_value[i] = val * variable / analog_coef ;
-		}
-*/
-		if ( i> 0){
-			//analog_value[i] = ((val - refcan - offset )  * variable ) / analog_coef;
-			/** ajout de 0.5 pas can car plus facile a diviser par 1024 multiple de 2 que 1023 */
-			analog_value[i] = mapfloat(val - offset + 0.5, 0, 1024, analog_IMAX[i], analog_IMIN[i]) * gain;
-		}
-		else {
-			//analog_value[i] = val * variable / analog_coef ;
-			analog_value[i] = mapfloat(val + 0.5, 0, 1024, analog_IMIN[i], analog_IMAX[i]);
-		}
-		/* conversion int2byte -> utilisation du pointer de lowbyte du int
-		byte bint[2] ;
-		bint[0] = (byte) analog_pin[i] ;
-		Serial.print("i : ");
-		Serial.print(bint[0]) ;
-		Serial.print(" | ");
-		int pascan = analogReadPin(bint[0]);
-		Serial.print(analog_name[i]);
-		Serial.print(" |val : ");
-		Serial.print(val) ;
-		Serial.print(" |pascan : ");
-		Serial.print(pascan) ;
-		Serial.print(" |refcan : ");
-		Serial.print(refcan) ;
-		Serial.print(" |variable : ");
-		Serial.print(variable) ;
-		Serial.print(" |analog_coef : ");
-		Serial.print(analog_coef) ;
-		Serial.print(" |analog_value : ");
-		Serial.print(analog_value[i]);
-		Serial.print(" |analog_val1 : ");
-		Serial.print(analog_val1);
-		Serial.print(" | ");
-		Serial.print(analog_val1);
-		Serial.print("\n");
-		*/
 	}
-	/* correction de la valeur du courant par le gain * entree 3
-	for(int i=1;i<=ANALOG_COUNT-2;i++){
-		analog_value[i] *= analog_value[3] ;
-		Serial.print(analog_name[i]);
-		Serial.print(" x gain : ");
-		Serial.println(analog_value[i]);
-		
-	}*/
-} // end of analog_get 
+} // end of analog_convert 
 
+void ana_get(){			// acquisition analogiques
+	for(int i=0;i<=ANALOG_COUNT-1;i++){
+		int val = analogReadPin(analog_pin[i]) + offset[i];
+		analog_value[i] += val ;
+		Serial.print(val) ;
+		Serial.print(" | ") ;
+	}
+	Serial.println() ;
+
+} // end of ana_get 
 
 void receiveEvent (int howMany){
 	command = Wire.read ();  // remember command for when we get request
@@ -365,9 +263,9 @@ void requestEvent (){
 		CMD_LIST = 2,
 		CMD_READ_VBAT = 3,
 		CMD_READ_IBAT = 4,
-		CMD_READ_PWM = 5,
-		CMD_READ_PWH = 6,
-		CMD_READ_CUMULPW = 7
+		CMD_READ_iaM = 5,
+		CMD_READ_iaH = 6,
+		CMD_READ_CUMULia = 7
 		CMD_ID = 9
 	*/
 		case CMD_LIST_LENGTH : {
@@ -385,81 +283,37 @@ void requestEvent (){
 			break;
 			
 		}
-		case CMD_READ_VBAT: send_pw (CMD_READ_VBAT); break;			// send VBAT
-		case CMD_READ_IBAT: send_pw (CMD_READ_IBAT); break;			// send IBAT
-		case CMD_READ_PWM: send_pw (CMD_READ_PWM); break;			// send PwM
-		case CMD_READ_PWH: send_pw (CMD_READ_PWH); break;			// send PwH
-		case CMD_READ_CUMULPW: send_pw (CMD_READ_CUMULPW); break;	// send CUMULPW
+		case CMD_READ_VBAT: send_ia (CMD_READ_VBAT); break;			// send VBAT
+		case CMD_READ_IBAT: send_ia (CMD_READ_IBAT); break;			// send IBAT
+		case CMD_READ_IAM: send_ia (CMD_READ_IAM); break;			// send iaM
+		case CMD_READ_IAH: send_ia (CMD_READ_IAH); break;			// send iaH
+		case CMD_READ_CUMULIA: send_ia (CMD_READ_CUMULIA); break;	// send CUMULia
 		case CMD_ID: Wire.write (MY_ADDRESS);	break;				// send id
 
 		}  // end of switch
 
 	}  // end of requestEvent
 
-void send_pw (byte valeur){
-
-/*	union Sharedblock
-	{
-		char ch[4]; // utiliser char parts[4] pour port série
-		byte part[4]; // utiliser byte parts[4] pour port i2c
-		float data;
-
-	} fl_byte;
-*/
-
-	//char buffer[10] ;
+void send_ia (byte valeur){
 
 	if (valeur == CMD_READ_VBAT){
-		//fl_byte.data = inm[0] ;
-		//sprintf(buffer, "%ld", inm[0]);
-		//I2C_writeAnything (buffer);
 		I2C_writeAnything (inm[0]);
-		
 	}
 	else if (valeur == CMD_READ_IBAT){
-		//fl_byte.data = inm[1] ;
-		//sprintf(buffer, "%ld", inm[1]);
-		//I2C_writeAnything (buffer);
 		I2C_writeAnything (inm[1]);
 	}
-	else if (valeur == CMD_READ_PWM){
-		//fl_byte.data = pwm[minut] ;
-		//sprintf(buffer, "%ld", pwm[minut]);
-		//I2C_writeAnything (buffer);
-		I2C_writeAnything (pwm[minut]);
+	else if (valeur == CMD_READ_IAM){
+		I2C_writeAnything (iam[minut]);
 	}
-	else if (valeur == CMD_READ_PWH){
+	else if (valeur == CMD_READ_IAH){
 		int heure = hour() ;
-		//fl_byte.data = pwh[heure] ;
-		//sprintf(buffer, "%ld", pwh[heure]);
-		//I2C_writeAnything (buffer);
-		I2C_writeAnything (pwh[heure]);
+		I2C_writeAnything (iah[heure]);
 	}
-	else if (valeur == CMD_READ_CUMULPW){
-		//fl_byte.data = cumulpwh ;
-		//sprintf(buffer, "%ld", cumulpwh);
-		//I2C_writeAnything (buffer);
-		I2C_writeAnything (cumulpwh);
+	else if (valeur == CMD_READ_CUMULIA){
+		I2C_writeAnything (cumuliah);
 	}
-	//Wire.write (fl_byte.part, 4);
 
-
-} // end of send_pw
-
-void Wire_SendDouble( float* d){
-
-	// Permet de partager deux types distinct sur un meme espace
-	// memoire
-	union Sharedblock
-	{
-		byte part[4]; // utiliser char parts[4] pour port série
-		float data;
-	} mon_block;
-
-	mon_block.data = *d;
-
-	Wire.write( mon_block.part, 4 );
-}
+} // end of send_ia
 
 //			****	fin des sous programmes		****
 
@@ -470,7 +324,7 @@ void setup(void){
 	digitalWrite(ledPin, HIGH);		// turn the LED on (HIGH is the voltage level)
 	//for(int i=0;i<=1;i++){
 		for(int j=0;j<=59;j++){			// raz de la moyenne glissante de puissance 
-			pwm [j] = 0 ;
+			iam [j] = 0 ;
 		}
 	//}
 	Serial.begin(BAUD_RATE);		// initialize serial:
@@ -505,75 +359,76 @@ void loop(void){
 			tLast = t;
 			if (second(t) % (60/s_freq) == 0 ) {		//acquisition des mesures
 				timber.pulse(ledPin, 500, LOW);
-				analog_get() ;
-				for(int i=0;i<=ANALOG_COUNT-1;i++){
+				ana_get() ;
+				/*for(int i=0;i<=ANALOG_COUNT-1;i++){
 					ins[i] += analog_value[i] ;		// cumul des x acquisitions / minute
 					//Serial.print(ins[i]) ;
 					//Serial.print(" | ") ;
 					
-				}
+				}*/
 				//Serial.println() ;
 			}
 			if (second(t) == 0) {						// calculs des mesures moyenne / minute
 				//Serial.print(F("time: ")) ;
-				Serial.print(now()) ;
-				Serial.print(",") ;
+				//Serial.print(now()) ;
+				//Serial.print(",") ;
 				char buffer[20] ;
 				char* bfr = buffer ;
 				digitalClockDisplay (bfr) ;
 				Serial.print(buffer) ;
 				Serial.print(F(",")) ;
 				//Serial.print(F("calcul de la minute : \n")) ;
+				analog_convert() ; 
 				for(int i=0;i<=ANALOG_COUNT-1;i++){
-					inm[i] = ins[i]  / s_freq ;			// acquisition minute = cumul / frequence d'acquisition
+					//inm[i] = ins[i]  ;			// acquisition minute = cumul
 					Serial.print(inm[i]) ;
 					Serial.print(F(",")) ;
-					ins[i] = 0 ;
+					analog_value[i] = 0 ;
 				}
 				//Serial.print(F("  ")) ;
 				/*for(int i=1;i<=2;i++){			// calcul de la puissance moyenne / minute
-					pwm[i -1] [minute(t)] = inm[0] * inm[1];
+					iam[i -1] [minute(t)] = inm[0] * inm[1];
 					Serial.print("|") ;
-					Serial.print(pwm[i -1] [minute(t)]);
+					Serial.print(iam[i -1] [minute(t)]);
 					Serial.print("|") ;
 				}
 				Serial.print("\n") ;
 				*/
 				/**for(int i=0;i<=1;i++){
-					// puissance moyenne / horaire - ( pw vielle minute )
-					pwmsigma[i] = pwmsigma[i] - pwm[i] [minute(t)] ;
+					// puissance moyenne / horaire - ( ia vielle minute )
+					iamsigma[i] = iamsigma[i] - iam[i] [minute(t)] ;
 					// calcul de la puissance moyenne / nouvelle minute
-					pwm[i] [minute(t)] = inm[0] * inm[i +1];
-					Serial.print(F(" |pw/min= ")) ;
-					Serial.print(pwm[i] [minute(t)]);
-					// puissance moyenne / horaire + ( pw nouvelle minute )
-					pwmsigma[i] = pwmsigma[i] + pwm[i] [minute(t)] ;
-					pwh[i] [hour()] = pwmsigma[i] / 60 ;
-					Serial.print(F(" |pwmoy/h= ")) ;
-					Serial.print(pwmsigma[i] /60) ;
+					iam[i] [minute(t)] = inm[0] * inm[i +1];
+					Serial.print(F(" |ia/min= ")) ;
+					Serial.print(iam[i] [minute(t)]);
+					// puissance moyenne / horaire + ( ia nouvelle minute )
+					iamsigma[i] = iamsigma[i] + iam[i] [minute(t)] ;
+					iah[i] [hour()] = iamsigma[i] / 60 ;
+					Serial.print(F(" |iamoy/h= ")) ;
+					Serial.print(iamsigma[i] /60) ;
 				}*/
-				// puissance moyenne / horaire - ( pw vielle minute )
+				// puissance moyenne / horaire - ( ia vielle minute )
 				minut = minute(t);
-				pwmsigma = pwmsigma - pwm [minut] ;
+				iamsigma = iamsigma - iam [minut] ;
 				// calcul de la puissance moyenne / nouvelle minute
-				pwm [minut] = inm[0] * inm[1];		// produit = tension * courant
-				//Serial.print(F(" |pw/min= ")) ;
-				Serial.print(pwm [minut]);
+				///iam [minut] = inm[0] * inm[1];		// produit = tension * courant
+				iam [minut] = inm[1];		// Ampère / minute
+				//Serial.print(F(" |ia/min= ")) ;
+				Serial.print(iam [minut]);
 				Serial.print(F(",")) ;
-					// puissance moyenne / horaire + ( pw nouvelle minute )
-				pwmsigma = pwmsigma + pwm [minut] ;
+					// puissance moyenne / horaire + ( ia nouvelle minute )
+				iamsigma = iamsigma + iam [minut] ;
 				int heure = hour();
-				pwh [heure] = pwmsigma / 60 ;
-				//Serial.print(F(" |pwmoy/h= ")) ;
-				Serial.print(pwh [heure]) ;
+				iah [heure] = iamsigma / 60 ;
+				//Serial.print(F(" |iamoy/h= ")) ;
+				Serial.print(iah [heure]) ;
 				Serial.print(F(",")) ;
-				cumulpwh += pwm [minut] / 60 ;
-				if (cumulpwh > maxpwh){
-					cumulpwh = maxpwh ;
+				cumuliah += iam [minut] / 60 ;
+				if (cumuliah > maxiah){
+					cumuliah = maxiah ;
 				}
-				Serial.print(cumulpwh) ;
-				Serial.print(F(",")) ;
-				Serial.print("\n") ;
+				Serial.print(cumuliah) ;
+				Serial.print(F(",\n")) ;
 			}
 		}
 		timber.update();	// mise à jour du timer*/
@@ -609,21 +464,27 @@ void serialEvent() {
 				Serial.print(buffer) ;
 			}
 			else if (octet == 'o'){			//set offset
-				Serial.print(offset);
-				Serial.print(" : ");
-				 if (Serial.available() >= 1){
-					offset = Serial.parseInt();
-					Serial.print(offset);
+				int index ;
+				delay(10);
+				 while (Serial.available() > 0){
+					index = Serial.parseInt();
+					Serial.print(offset[index]);
+					Serial.print(" : ");
+					offset[index] = Serial.parseInt();
 				 }
+				Serial.print(offset[index]);
 				Serial.println();
 			}
 			else if (octet == 'g'){			//set gain
-				Serial.print(gain);
-				Serial.print(" : ");
-				if (Serial.available() >= 1){
-					gain = Serial.parseFloat();
-					Serial.print(gain);
+				int index ;
+				delay(10);
+				while (Serial.available() > 0){
+					int index = Serial.parseInt();
+					Serial.print(gain[index]);
+					Serial.print(" : ");
+					gain[index] = Serial.parseInt();
 				}
+				Serial.print(gain[index]);
 				Serial.println();
 			}
 			else if (octet == 'r'){
@@ -632,7 +493,7 @@ void serialEvent() {
 			else if (octet == 'p'){
 				for(int i=0;i<=24-1;i++){
 					Serial.print("|") ;
-					Serial.print(pwh[i]);
+					Serial.print(iah[i]);
 				}
 				Serial.print("\n") ;
 			}
