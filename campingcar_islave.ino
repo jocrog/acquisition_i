@@ -12,17 +12,17 @@
 		* 	0.0.3 - affichage courants
 		* 	0.0.4 - entree A1 utilisée comme +- correcteur de gain (5 spires)
 		* 	0.0.5 - calcul de puissance et moyenne glissante float
-M		* 	0.0.6 - calcul moyenne glissante = somme -vieux + nouveau / nombre
+		* 	0.0.6 - calcul moyenne glissante = somme -vieux + nouveau / nombre
 		* 	0.0.7 - envoi de donnee modele csv
 		* 	0.0.8 - envoi de float sur wire
 		* 	0.0.9 - correction A/h au lieu de W/h
 		* 	0.0.10 - conversion float en long 
-D		* 	0.0.11 - retour au float 
+MD		* 	0.0.11 - retour au float 
 	*/
 
 // programme :
 const char title[] = "Acq_data_U-I-P";
-const char version[] = "0.0.10";
+const char version[] = "0.0.11";
 
 #include <Arduino.h>
 #include "Timer.h"
