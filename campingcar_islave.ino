@@ -15,12 +15,14 @@
 M		* 	0.0.6 - calcul moyenne glissante = somme -vieux + nouveau / nombre
 		* 	0.0.7 - envoi de donnee modele csv
 		* 	0.0.8 - envoi de float sur wire
-D		* 	0.0.9 - correction A/h au lieu de W/h 
+		* 	0.0.9 - correction A/h au lieu de W/h
+		* 	0.0.10 - conversion float en long 
+D		* 	0.0.11 - retour au float 
 	*/
 
 // programme :
 const char title[] = "Acq_data_U-I-P";
-const char version[] = "0.0.9";
+const char version[] = "0.0.10";
 
 #include <Arduino.h>
 #include "Timer.h"
@@ -63,6 +65,7 @@ const unsigned int BAUD_RATE = 19200 ;
 // parametres i2c
 const int MY_ADDRESS = 12;
 const int MASTER_ADDRESS = 11;
+const int s_freq = 10 ;				// nombre d acquisition par minute periode 6s = 10
 
 	// definition des parametres d entrees analogiques ( 1 voie)
 char* analog_name[ANALOG_COUNT] = {"VBat", "IBat" } ; //, "I_ext", "opt"};
@@ -70,30 +73,28 @@ char* ia_name[ANALOG_COUNT] = {"Am", "Ah" } ; //, "1ia_Min", "1iaH_moy"};
 //const byte analog_pin[ANALOG_COUNT] = {0, 3} ; //, 2, 1};
 const byte analog_pin[ANALOG_COUNT] = {0, 2} ; //, 3, 1};
 	//les nombres sont à multiplier par 2puissance23 pour travailler avec des entiers
-const long analog_IMIN[ANALOG_COUNT] = { 0, -16000 } ; //, -16, -16};
-const long analog_IMAX[ANALOG_COUNT] = { 15000, 16000 } ; //, 16, 16};
-long analog_value[ANALOG_COUNT];
-int offset[ANALOG_COUNT] = {0, -105} ;		// offset pascan conpensation ecart a 0amp
+const long analog_IMIN[ANALOG_COUNT] = { 0, -16 } ; //, -16, -16};
+const long analog_IMAX[ANALOG_COUNT] = { 15, 16 } ; //, 16, 16};
+int analog_value[ANALOG_COUNT];
+int offset[ANALOG_COUNT] = {0, -97} ;		// offset pascan conpensation ecart a 0amp
 int gain[ANALOG_COUNT] = {115, 115} ;		// gain de correction ana
-//const float bandgap_voltage = 1.1 ;	// this is not super guaranteed but its not -too- off
 	//float vref = 12.600 ;		// tension alim 25.24/2  actuellement non utilisé
 	//const int refcan = 512 ;		// pas can a demi plage 0amp actuellement non utilisé
 
 // Variables :
+bool debug = false ;   					// mode debug
 bool sflag;   					// caractere 's' reçu => mise a l heure
-int s_freq = 10 ;				// nombre d acquisition par minute periode 6s = 10
-//long ins[ ANALOG_COUNT ] ;		// registre stat de data 60 / s_freq = toute les n secondes
-long inm[ ANALOG_COUNT ] ;		// registre stat de data minute : moyenne ( cumul / s_freq )
-long inh[ANALOG_COUNT] [24] ;	// registre stat de data heure
+float inm[ ANALOG_COUNT ] ;		// registre stat de data minute : moyenne ( cumul / s_freq )
+float inh[ANALOG_COUNT] [24] ;	// registre stat de data heure
 	/*float iam[2] [60] ;				// puissance moyenne / minute pour calculer la moyenne glissante
 	float iah[2] [24] ;					// puissance moyenne glissante en watt/heure
 	float iamsigma[2] ;					// somme des puissances/minutes
 	** utilisé pour 2 voie de calcul de puissance */
-long iam[60] ;					// puissance moyenne / minute pour calculer la moyenne glissante
-long iah[24] ;					// puissance moyenne glissante en watt/heure
-long iamsigma ;				// somme des puissances/minutes
-const int maxiah = 200000 ;		// capacité max batterie
-long cumuliah ;				// cumul energie
+float iam[60] ;					// puissance moyenne / minute pour calculer la moyenne glissante
+float iah[24] ;					// puissance moyenne glissante en ampere/heure
+float iamsigma ;				// somme des puissances/minutes
+const int maxiah = 200 ;		// capacité max batterie
+float cumuliah ;				// cumul energie
 int minut ;						// index minute actuelle
 Timer timber;
 
@@ -115,6 +116,10 @@ char command;
 //			****	sous programmes		****
 
 void(* resetFunc) (void) = 0; //declare reset function @ address 0
+
+float mapfloat(float x, float in_min, float in_max, float out_min, float out_max){
+ return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
 
 /** Mesure entree ANA avec la référence interne à 1.1 volts */
 unsigned int analogReadPin(byte pin) {
@@ -230,25 +235,18 @@ void analog_convert(){	//conversion de 10 acquisitions pascan / minutes
 
 	for(int i=0;i<=ANALOG_COUNT-1;i++){
 		if ( i> 0){
-			inm[i] = map(analog_value[i] , 0, 10240, analog_IMAX[i], analog_IMIN[i]) * gain[i] / 100;
+			inm[i] = mapfloat(analog_value[i] , 0, 10240, analog_IMAX[i], analog_IMIN[i]) * gain[i] / 100;
 		}
 		else {
-			inm[i] = map(analog_value[i] , 0, 10240, analog_IMIN[i], analog_IMAX[i]);
+			inm[i] = mapfloat(analog_value[i] , 0, 10240, analog_IMIN[i], analog_IMAX[i]);
 		}
-		Serial.println(inm[i]) ;
-
 	}
 } // end of analog_convert 
 
 void ana_get(){			// acquisition analogiques
 	for(int i=0;i<=ANALOG_COUNT-1;i++){
-		int val = analogReadPin(analog_pin[i]) + offset[i];
-		analog_value[i] += val ;
-		Serial.print(val) ;
-		Serial.print(" | ") ;
+		analog_value[i] += analogReadPin(analog_pin[i]) + offset[i];
 	}
-	Serial.println() ;
-
 } // end of ana_get 
 
 void receiveEvent (int howMany){
@@ -315,6 +313,13 @@ void send_ia (byte valeur){
 
 } // end of send_ia
 
+void send_title (){
+	Serial.println();
+	Serial.print(title);
+	Serial.print(F(" "));
+	Serial.println(version);
+}
+
 //			****	fin des sous programmes		****
 
 void setup(void){
@@ -328,12 +333,7 @@ void setup(void){
 		}
 	//}
 	Serial.begin(BAUD_RATE);		// initialize serial:
-	Serial.println();
-	Serial.print(title);
-	Serial.print(F(" "));
-	Serial.println(version);
-	//setSyncProvider() causes the Time library to synchronize with the
-	//external RTC by calling RTC.get() every five minutes by default.
+	send_title () ;
 	setSyncProvider(RTC.get);
 	if (timeStatus() != timeSet){
 		Serial.print(F(" FAIL remote RTC!\n"));
@@ -360,28 +360,28 @@ void loop(void){
 			if (second(t) % (60/s_freq) == 0 ) {		//acquisition des mesures
 				timber.pulse(ledPin, 500, LOW);
 				ana_get() ;
-				/*for(int i=0;i<=ANALOG_COUNT-1;i++){
-					ins[i] += analog_value[i] ;		// cumul des x acquisitions / minute
-					//Serial.print(ins[i]) ;
-					//Serial.print(" | ") ;
-					
-				}*/
-				//Serial.println() ;
+				if (debug){
+					for(int i=0;i<=ANALOG_COUNT-1;i++){
+						Serial.print(analog_value[i]) ;
+						Serial.print(" | ") ;
+					}
+					Serial.println() ;
+					for(int i=0;i<=60-1;i++){
+						Serial.print("|") ;
+						Serial.print(iam[i]);
+					}
+					Serial.println() ;
+				}
 			}
 			if (second(t) == 0) {						// calculs des mesures moyenne / minute
-				//Serial.print(F("time: ")) ;
-				//Serial.print(now()) ;
-				//Serial.print(",") ;
 				char buffer[20] ;
 				char* bfr = buffer ;
 				digitalClockDisplay (bfr) ;
 				Serial.print(buffer) ;
 				Serial.print(F(",")) ;
-				//Serial.print(F("calcul de la minute : \n")) ;
 				analog_convert() ; 
 				for(int i=0;i<=ANALOG_COUNT-1;i++){
-					//inm[i] = ins[i]  ;			// acquisition minute = cumul
-					Serial.print(inm[i]) ;
+					Serial.print(inm[i],3) ;
 					Serial.print(F(",")) ;
 					analog_value[i] = 0 ;
 				}
@@ -414,20 +414,23 @@ void loop(void){
 				///iam [minut] = inm[0] * inm[1];		// produit = tension * courant
 				iam [minut] = inm[1];		// Ampère / minute
 				//Serial.print(F(" |ia/min= ")) ;
-				Serial.print(iam [minut]);
-				Serial.print(F(",")) ;
+		// impression puissance minute en a/h = inm[1]
+				//Serial.print(iam [minut], 3);
+				//Serial.print(F(",")) ;
 					// puissance moyenne / horaire + ( ia nouvelle minute )
 				iamsigma = iamsigma + iam [minut] ;
 				int heure = hour();
 				iah [heure] = iamsigma / 60 ;
 				//Serial.print(F(" |iamoy/h= ")) ;
-				Serial.print(iah [heure]) ;
+		// impression puissance/heure
+				Serial.print(iah [heure], 3) ;
 				Serial.print(F(",")) ;
 				cumuliah += iam [minut] / 60 ;
 				if (cumuliah > maxiah){
 					cumuliah = maxiah ;
 				}
-				Serial.print(cumuliah) ;
+		// impression cumul
+				Serial.print(cumuliah, 3) ;
 				Serial.print(F(",\n")) ;
 			}
 		}
@@ -444,11 +447,14 @@ void serialEvent() {
 				Serial << F("tapper : \n"
 							"h ou ? -> ce menu\n"
 							"syy,m,d,h,m,s -> mise a l heure\n"
+							"d -> debug - reglage\n"
 							"l -> liste des variables\n"
 							"o -> correction offset courant\n"
 							"g -> gain courant\n"
 							"p -> stat puissance 24H\n"
-							"r -> reset avr\n") << endl;
+							"m -> stat puissance Horaire\n"
+							"r -> reset avr\n"
+							"v -> version\n") << endl;
 			}
 			else if(octet == 's'){
 				sflag = true;
@@ -456,6 +462,9 @@ void serialEvent() {
 				if (Serial.available() >= 12){
 					set_rtcTime();
 				}
+			}
+			else if(octet == 'd'){
+				debug = !debug ;
 			}
 			else if(octet == 'l'){
 				char buffer[63] ;
@@ -465,30 +474,36 @@ void serialEvent() {
 			}
 			else if (octet == 'o'){			//set offset
 				int index ;
-				delay(10);
-				 while (Serial.available() > 0){
+				delay(5);
+				 if (Serial.available() > 0){
 					index = Serial.parseInt();
 					Serial.print(offset[index]);
 					Serial.print(" : ");
+					delay(5);
+				}
+				if (Serial.available() > 0){
 					offset[index] = Serial.parseInt();
-				 }
+				}
 				Serial.print(offset[index]);
 				Serial.println();
 			}
 			else if (octet == 'g'){			//set gain
 				int index ;
-				delay(10);
-				while (Serial.available() > 0){
+				delay(5);
+				if (Serial.available() > 0){
 					int index = Serial.parseInt();
 					Serial.print(gain[index]);
 					Serial.print(" : ");
+					delay(5);
+				}
+				if (Serial.available() > 0){
 					gain[index] = Serial.parseInt();
 				}
 				Serial.print(gain[index]);
-				Serial.println();
+				Serial.println() ;
 			}
 			else if (octet == 'r'){
-				 resetFunc();  //call reset
+				resetFunc() ;  //call reset
 			}
 			else if (octet == 'p'){
 				for(int i=0;i<=24-1;i++){
@@ -496,6 +511,16 @@ void serialEvent() {
 					Serial.print(iah[i]);
 				}
 				Serial.print("\n") ;
+			}
+			else if (octet == 'm'){
+				for(int i=0;i<=60-1;i++){
+					Serial.print("|") ;
+					Serial.print(iam[i]);
+				}
+				Serial.println() ;
+			}
+			else if (octet == 'v'){
+				send_title ;
 			}
 			else {
 				Serial.print(F("commande inconnue : '"));
