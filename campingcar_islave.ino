@@ -18,7 +18,8 @@
 		* 	0.0.9 - correction A/h au lieu de W/h
 		* 	0.0.10 - conversion float en long 
 M		* 	0.0.11 - retour au float
-D		* 	0.0.12 - calcul moyennes en pas CAN
+		* 	0.0.12 - calcul moyennes en pas CAN
+d		* 	0.0.13 - commande frigo elect si reception i2c[8]
  
 	*/
 
