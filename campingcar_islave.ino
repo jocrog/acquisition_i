@@ -17,21 +17,25 @@
 		* 	0.0.8 - envoi de float sur wire
 		* 	0.0.9 - correction A/h au lieu de W/h
 		* 	0.0.10 - conversion float en long 
-MD		* 	0.0.11 - retour au float 
+M		* 	0.0.11 - retour au float
+D		* 	0.0.12 - calcul moyennes en pas CAN
+ 
 	*/
 
 // programme :
 const char title[] = "Acq_data_U-I-P";
-const char version[] = "0.0.11";
+const char version[] = "0.0.12";
 
 #include <Arduino.h>
+#include <string.h>
+#include <I2C_Anything.h>
 #include "Timer.h"
 #include <DS3232RTC.h>    //http://github.com/JChristensen/DS3232RTC
 #include <Time.h>         //http://www.arduino.cc/playground/Code/Time  
 #include <Wire.h>         //http://arduino.cc/en/Reference/Wire (included with Arduino IDE)
 #include <Streaming.h>        //http://arduiniana.org/libraries/streaming/
-#include <I2C_Anything.h>
 
+using namespace std;
 
 /*	recapitulatif des i/o arduino
 	#define rx	D0			// libre
@@ -60,6 +64,7 @@ const char version[] = "0.0.11";
 #define ANALOG_COUNT 2
 
 const int ledPin = 8;			// the number of the LED pin
+const int frigoPin = 7 ;		// numero de sortie affectée a mettre le frigo sur batterie lorsque celle ci est pleine
 const unsigned int BAUD_RATE = 19200 ;
 
 // parametres i2c
@@ -83,6 +88,7 @@ int gain[ANALOG_COUNT] = {115, 115} ;		// gain de correction ana
 
 // Variables :
 bool debug = false ;   					// mode debug
+bool battery = false ;					// frigo sur batterie
 bool sflag;   					// caractere 's' reçu => mise a l heure
 float inm[ ANALOG_COUNT ] ;		// registre stat de data minute : moyenne ( cumul / s_freq )
 float inh[ANALOG_COUNT] [24] ;	// registre stat de data heure
@@ -90,7 +96,7 @@ float inh[ANALOG_COUNT] [24] ;	// registre stat de data heure
 	float iah[2] [24] ;					// puissance moyenne glissante en watt/heure
 	float iamsigma[2] ;					// somme des puissances/minutes
 	** utilisé pour 2 voie de calcul de puissance */
-float iam[60] ;					// puissance moyenne / minute pour calculer la moyenne glissante
+long iam[60] ;				// puissance moyenne / minute pour calculer la moyenne glissante
 float iah[24] ;					// puissance moyenne glissante en ampere/heure
 float iamsigma ;				// somme des puissances/minutes
 const int maxiah = 200 ;		// capacité max batterie
@@ -108,10 +114,17 @@ enum {
 	CMD_READ_IAM = 5,
 	CMD_READ_IAH = 6,
 	CMD_READ_CUMULIA = 7,
+	CMD_WRITE_FRIGO = 8,
 	CMD_ID = 9
 	};
 
 char command;
+
+union mesure{
+		byte bval[4] ;
+		unsigned int ival[2] ; 
+		unsigned long lval ;
+	} valeur ;
 
 //			****	sous programmes		****
 
@@ -174,7 +187,7 @@ void set_rtcTime(){		//set rtc time
 	}
 } // end of set_rtcTime
 
-byte send_labels(char *liste){		//send list of variables
+byte get_list(char *liste){		//get list of variables
 	/*strcpy (liste, "Labels") ;
 	strcat(liste, ",");
 	strcat(liste, "TimeIndex");
@@ -196,7 +209,7 @@ byte send_labels(char *liste){		//send list of variables
 	return strlen(liste);
 } // end of send_list
 
-char* send_data(){		//send list of variables
+char* get_data(){		//get list of variables
 	char liste [64];
 
 	unsigned long t = now();
@@ -231,17 +244,22 @@ char* digitalClockDisplay(char* buffer){
 	return buffer ;
 }
 
-void analog_convert(){	//conversion de 10 acquisitions pascan / minutes
+void analog_print(int value, int index){	//print conversion X acquisitions
 
-	for(int i=0;i<=ANALOG_COUNT-1;i++){
-		if ( i> 0){
-			inm[i] = mapfloat(analog_value[i] , 0, 10240, analog_IMAX[i], analog_IMIN[i]) * gain[i] / 100;
+	if ( value == 0 ){		// conversion 10 acquisition / minute
+		Serial.print(F("/0?")) ;
+	}
+	else {
+		if ( index > 0){
+			Serial.print( mapfloat(analog_value[index] , 0, 10240 * value, analog_IMAX[index], analog_IMIN[index]) * gain[index] / 100, 3 ) ;
 		}
 		else {
-			inm[i] = mapfloat(analog_value[i] , 0, 10240, analog_IMIN[i], analog_IMAX[i]);
+			Serial.print( mapfloat(analog_value[index] , 0, 10240 * value, analog_IMIN[index], analog_IMAX[index]), 3 ) ;
 		}
 	}
-} // end of analog_convert 
+	Serial.print(F(",")) ;
+
+} // end of analog_print 
 
 void ana_get(){			// acquisition analogiques
 	for(int i=0;i<=ANALOG_COUNT-1;i++){
@@ -264,19 +282,20 @@ void requestEvent (){
 		CMD_READ_iaM = 5,
 		CMD_READ_iaH = 6,
 		CMD_READ_CUMULia = 7
+		CMD_WRITE_FRIGO = 8,
 		CMD_ID = 9
 	*/
 		case CMD_LIST_LENGTH : {
 			char buffer[32] ;
 			char* bfr = buffer ;
-			byte rc = send_labels(bfr) ;
+			byte rc = get_list(bfr) ;
 			Wire.write (rc);					// send list length
 			break;
 		}
 		case CMD_LIST : {
 			char buffer[32] ;
 			char* bfr = buffer ;
-			byte rc = send_labels(bfr) ;
+			byte rc = get_list(bfr) ;
 			Wire.write (bfr);					// send list length
 			break;
 			
@@ -286,6 +305,22 @@ void requestEvent (){
 		case CMD_READ_IAM: send_ia (CMD_READ_IAM); break;			// send iaM
 		case CMD_READ_IAH: send_ia (CMD_READ_IAH); break;			// send iaH
 		case CMD_READ_CUMULIA: send_ia (CMD_READ_CUMULIA); break;	// send CUMULia
+		case CMD_WRITE_FRIGO: {										//batterie en floating => frigo electrique
+			byte rc = Wire.read();
+			if (rc == 1) {
+				digitalWrite(frigoPin, HIGH);
+				battery = true ;
+			}
+			else {
+				digitalWrite(frigoPin, LOW);
+				battery = false ;
+			}
+			Serial.print(F("reception frigo_elect :"));
+			Serial.print(rc);
+			Serial.print(F("\n"));
+			battery = rc;
+			break;
+		}
 		case CMD_ID: Wire.write (MY_ADDRESS);	break;				// send id
 
 		}  // end of switch
@@ -313,7 +348,7 @@ void send_ia (byte valeur){
 
 } // end of send_ia
 
-void send_title (){
+void print_title (){
 	Serial.println();
 	Serial.print(title);
 	Serial.print(F(" "));
@@ -327,13 +362,15 @@ void setup(void){
 	command = 0;
 	pinMode(ledPin, OUTPUT);
 	digitalWrite(ledPin, HIGH);		// turn the LED on (HIGH is the voltage level)
+	pinMode(frigoPin, OUTPUT);
+	digitalWrite(frigoPin, LOW);		// turn the LED on (HIGH is the voltage level)
 	//for(int i=0;i<=1;i++){
 		for(int j=0;j<=59;j++){			// raz de la moyenne glissante de puissance 
 			iam [j] = 0 ;
 		}
 	//}
 	Serial.begin(BAUD_RATE);		// initialize serial:
-	send_title () ;
+	print_title () ;
 	setSyncProvider(RTC.get);
 	if (timeStatus() != timeSet){
 		Serial.print(F(" FAIL remote RTC!\n"));
@@ -379,10 +416,9 @@ void loop(void){
 				digitalClockDisplay (bfr) ;
 				Serial.print(buffer) ;
 				Serial.print(F(",")) ;
-				analog_convert() ; 
 				for(int i=0;i<=ANALOG_COUNT-1;i++){
-					Serial.print(inm[i],3) ;
-					Serial.print(F(",")) ;
+					inm[i] = analog_value[i] ;
+					analog_print(i, 1) ;
 					analog_value[i] = 0 ;
 				}
 				//Serial.print(F("  ")) ;
@@ -408,7 +444,7 @@ void loop(void){
 					Serial.print(iamsigma[i] /60) ;
 				}*/
 				// puissance moyenne / horaire - ( ia vielle minute )
-				minut = minute(t);
+				int minut = minute(t);
 				iamsigma = iamsigma - iam [minut] ;
 				// calcul de la puissance moyenne / nouvelle minute
 				///iam [minut] = inm[0] * inm[1];		// produit = tension * courant
@@ -434,6 +470,7 @@ void loop(void){
 				Serial.print(F(",\n")) ;
 			}
 		}
+		
 		timber.update();	// mise à jour du timer*/
 	}
 } // end of loop
@@ -447,6 +484,7 @@ void serialEvent() {
 				Serial << F("tapper : \n"
 							"h ou ? -> ce menu\n"
 							"syy,m,d,h,m,s -> mise a l heure\n"
+							"b -> m/a frigo sur batterie\n"
 							"d -> debug - reglage\n"
 							"l -> liste des variables\n"
 							"o -> correction offset courant\n"
@@ -463,13 +501,27 @@ void serialEvent() {
 					set_rtcTime();
 				}
 			}
+			else if(octet == 'b'){
+				delay(5);
+				if (Serial.available() > 0){
+					int val = Serial.parseInt();
+					if (val == 0){
+						battery = false;
+						digitalWrite(frigoPin, LOW);
+					}
+					else if (val == 1){
+						battery = true ;
+						digitalWrite(frigoPin, HIGH);
+					}
+				}
+			}
 			else if(octet == 'd'){
 				debug = !debug ;
 			}
 			else if(octet == 'l'){
 				char buffer[63] ;
 				char* bfr = buffer ;
-				send_labels(bfr);
+				get_list(bfr);
 				Serial.print(buffer) ;
 			}
 			else if (octet == 'o'){			//set offset
@@ -520,7 +572,7 @@ void serialEvent() {
 				Serial.println() ;
 			}
 			else if (octet == 'v'){
-				send_title ;
+				print_title ;
 			}
 			else {
 				Serial.print(F("commande inconnue : '"));
