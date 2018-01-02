@@ -19,13 +19,14 @@
 		* 	0.0.10 - conversion float en long 
 M		* 	0.0.11 - retour au float
 		* 	0.0.12 - calcul moyennes en pas CAN
-d		* 	0.0.13 - commande frigo elect si reception i2c[8]
+		* 	0.0.13 - commande frigo elect si reception i2c[8]
+d		* 	0.0.14 - commande frigo affectée sortie 9 pwm timer1
  
 	*/
 
 // programme :
 const char title[] = "Acq_data_U-I-P";
-const char version[] = "0.0.12";
+const char version[] = "0.0.14";
 
 #include <Arduino.h>
 #include <string.h>
@@ -48,7 +49,7 @@ using namespace std;
 	#define 		D6			// libre
 	#define 		D7			// libre
 	#define 		D8			// ledpin
-	#define 		D9			// libre
+	#define 		D9			// frigoPin
 	#define 		D10			// libre
 	#define mosi	D11			// SPI SD	MOSI
 	#define miso	D12			// SPI SD	MISO
@@ -65,12 +66,12 @@ using namespace std;
 #define ANALOG_COUNT 2
 
 const int ledPin = 8;			// the number of the LED pin
-const int frigoPin = 7 ;		// numero de sortie affectée a mettre le frigo sur batterie lorsque celle ci est pleine
+const int frigoPin = 9 ;		// numero de sortie affectée a mettre le frigo sur batterie lorsque celle ci est pleine
 const unsigned int BAUD_RATE = 19200 ;
 
 // parametres i2c
 const int MY_ADDRESS = 12;
-const int MASTER_ADDRESS = 11;
+//const int MASTER_ADDRESS = 11;
 const int s_freq = 10 ;				// nombre d acquisition par minute periode 6s = 10
 
 	// definition des parametres d entrees analogiques ( 1 voie)
@@ -78,18 +79,16 @@ char* analog_name[ANALOG_COUNT] = {"VBat", "IBat" } ; //, "I_ext", "opt"};
 char* ia_name[ANALOG_COUNT] = {"Am", "Ah" } ; //, "1ia_Min", "1iaH_moy"};
 //const byte analog_pin[ANALOG_COUNT] = {0, 3} ; //, 2, 1};
 const byte analog_pin[ANALOG_COUNT] = {0, 2} ; //, 3, 1};
-	//les nombres sont à multiplier par 2puissance23 pour travailler avec des entiers
 const long analog_IMIN[ANALOG_COUNT] = { 0, -16 } ; //, -16, -16};
 const long analog_IMAX[ANALOG_COUNT] = { 15, 16 } ; //, 16, 16};
 int analog_value[ANALOG_COUNT];
 int offset[ANALOG_COUNT] = {0, -97} ;		// offset pascan conpensation ecart a 0amp
-int gain[ANALOG_COUNT] = {115, 115} ;		// gain de correction ana
+int gain[ANALOG_COUNT] = {115, 115} ;		// * gain de correction ana / 100 
 	//float vref = 12.600 ;		// tension alim 25.24/2  actuellement non utilisé
 	//const int refcan = 512 ;		// pas can a demi plage 0amp actuellement non utilisé
 
 // Variables :
 bool debug = false ;   					// mode debug
-bool battery = false ;					// frigo sur batterie
 bool sflag;   					// caractere 's' reçu => mise a l heure
 float inm[ ANALOG_COUNT ] ;		// registre stat de data minute : moyenne ( cumul / s_freq )
 float inh[ANALOG_COUNT] [24] ;	// registre stat de data heure
@@ -97,12 +96,11 @@ float inh[ANALOG_COUNT] [24] ;	// registre stat de data heure
 	float iah[2] [24] ;					// puissance moyenne glissante en watt/heure
 	float iamsigma[2] ;					// somme des puissances/minutes
 	** utilisé pour 2 voie de calcul de puissance */
-long iam[60] ;				// puissance moyenne / minute pour calculer la moyenne glissante
+float iam[60] ;				// puissance moyenne / minute pour calculer la moyenne glissante
 float iah[24] ;					// puissance moyenne glissante en ampere/heure
 float iamsigma ;				// somme des puissances/minutes
 const int maxiah = 200 ;		// capacité max batterie
 float cumuliah ;				// cumul energie
-int minut ;						// index minute actuelle
 Timer timber;
 
 // various commands we might get
@@ -120,12 +118,6 @@ enum {
 	};
 
 char command;
-
-union mesure{
-		byte bval[4] ;
-		unsigned int ival[2] ; 
-		unsigned long lval ;
-	} valeur ;
 
 //			****	sous programmes		****
 
@@ -245,23 +237,6 @@ char* digitalClockDisplay(char* buffer){
 	return buffer ;
 }
 
-void analog_print(int value, int index){	//print conversion X acquisitions
-
-	if ( value == 0 ){		// conversion 10 acquisition / minute
-		Serial.print(F("/0?")) ;
-	}
-	else {
-		if ( index > 0){
-			Serial.print( mapfloat(analog_value[index] , 0, 10240 * value, analog_IMAX[index], analog_IMIN[index]) * gain[index] / 100, 3 ) ;
-		}
-		else {
-			Serial.print( mapfloat(analog_value[index] , 0, 10240 * value, analog_IMIN[index], analog_IMAX[index]), 3 ) ;
-		}
-	}
-	Serial.print(F(",")) ;
-
-} // end of analog_print 
-
 void ana_get(){			// acquisition analogiques
 	for(int i=0;i<=ANALOG_COUNT-1;i++){
 		analog_value[i] += analogReadPin(analog_pin[i]) + offset[i];
@@ -308,18 +283,17 @@ void requestEvent (){
 		case CMD_READ_CUMULIA: send_ia (CMD_READ_CUMULIA); break;	// send CUMULia
 		case CMD_WRITE_FRIGO: {										//batterie en floating => frigo electrique
 			byte rc = Wire.read();
-			if (rc == 1) {
+			if (rc == 0x01) {
 				digitalWrite(frigoPin, HIGH);
-				battery = true ;
+				Wire.write (rc);
 			}
 			else {
 				digitalWrite(frigoPin, LOW);
-				battery = false ;
+				Wire.write (rc);
 			}
 			Serial.print(F("reception frigo_elect :"));
-			Serial.print(rc);
+			Serial.print(rc, HEX);
 			Serial.print(F("\n"));
-			battery = rc;
 			break;
 		}
 		case CMD_ID: Wire.write (MY_ADDRESS);	break;				// send id
@@ -332,19 +306,46 @@ void send_ia (byte valeur){
 
 	if (valeur == CMD_READ_VBAT){
 		I2C_writeAnything (inm[0]);
+		if (debug){
+			Serial.print(F("VBAT :"));
+			Serial.print(inm[0]);
+			Serial.print(F("\n"));
+		}
 	}
 	else if (valeur == CMD_READ_IBAT){
 		I2C_writeAnything (inm[1]);
+		if (debug){
+			Serial.print(F("IBAT :"));
+			Serial.print(inm[1]);
+			Serial.print(F("\n"));
+		}
 	}
 	else if (valeur == CMD_READ_IAM){
+		int t = now();
+		int minut = minute(t);						// index minute actuelle
 		I2C_writeAnything (iam[minut]);
+		if (debug){
+			Serial.print(F("IAM :"));
+			Serial.print(iam[minut]);
+			Serial.print(F("\n"));
+		}
 	}
 	else if (valeur == CMD_READ_IAH){
 		int heure = hour() ;
 		I2C_writeAnything (iah[heure]);
+		if (debug){
+			Serial.print(F("IAH :"));
+			Serial.print(iah[heure]);
+			Serial.print(F("\n"));
+		}
 	}
 	else if (valeur == CMD_READ_CUMULIA){
 		I2C_writeAnything (cumuliah);
+		if (debug){
+			Serial.print(F("CUMUL :"));
+			Serial.print(cumuliah);
+			Serial.print(F("\n"));
+		}
 	}
 
 } // end of send_ia
@@ -418,8 +419,14 @@ void loop(void){
 				Serial.print(buffer) ;
 				Serial.print(F(",")) ;
 				for(int i=0;i<=ANALOG_COUNT-1;i++){
-					inm[i] = analog_value[i] ;
-					analog_print(i, 1) ;
+					if ( i > 0){
+						inm[i] = mapfloat(analog_value[i] , 0, 10240, analog_IMAX[i], analog_IMIN[i]) * gain[i] / 100 ;
+					}
+					else {
+						inm[i] = mapfloat(analog_value[i] , 0, 10240, analog_IMIN[i], analog_IMAX[i]) ;
+					}
+					Serial.print(inm[i],3) ;
+					Serial.print(F(",")) ;
 					analog_value[i] = 0 ;
 				}
 				//Serial.print(F("  ")) ;
@@ -458,11 +465,12 @@ void loop(void){
 				iamsigma = iamsigma + iam [minut] ;
 				int heure = hour();
 				iah [heure] = iamsigma / 60 ;
-				//Serial.print(F(" |iamoy/h= ")) ;
+				Serial.print(F(" iamoy/h= ")) ;
 		// impression puissance/heure
 				Serial.print(iah [heure], 3) ;
 				Serial.print(F(",")) ;
 				cumuliah += iam [minut] / 60 ;
+				Serial.print(F(" cumuliah= ")) ;
 				if (cumuliah > maxiah){
 					cumuliah = maxiah ;
 				}
@@ -484,15 +492,14 @@ void serialEvent() {
 			if (octet == 'h' or octet == '?'){
 				Serial << F("tapper : \n"
 							"h ou ? -> ce menu\n"
-							"syy,m,d,h,m,s -> mise a l heure\n"
 							"b -> m/a frigo sur batterie\n"
 							"d -> debug - reglage\n"
 							"l -> liste des variables\n"
 							"o -> correction offset courant\n"
-							"g -> gain courant\n"
 							"p -> stat puissance 24H\n"
 							"m -> stat puissance Horaire\n"
 							"r -> reset avr\n"
+							"syy,m,d,h,m,s -> mise a l heure\n"
 							"v -> version\n") << endl;
 			}
 			else if(octet == 's'){
@@ -507,11 +514,9 @@ void serialEvent() {
 				if (Serial.available() > 0){
 					int val = Serial.parseInt();
 					if (val == 0){
-						battery = false;
 						digitalWrite(frigoPin, LOW);
 					}
 					else if (val == 1){
-						battery = true ;
 						digitalWrite(frigoPin, HIGH);
 					}
 				}
