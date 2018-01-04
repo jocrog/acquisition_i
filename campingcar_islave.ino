@@ -20,7 +20,7 @@
 		* 	0.0.11 - retour au float
 		* 	0.0.12 - calcul moyennes en pas CAN
 		* 	0.0.13 - commande frigo elect si reception i2c[8]
-M		* 	0.0.14 - commande frigo affectée sortie 9 pwm timer1
+		* 	0.0.14 - commande frigo affectée sortie 9 pwm timer1
 -------------fusion programme désulfate en pas can-------------------------------------------------
 *		* 	0.0.1 - re-ecriture du programme de mesure de courant V0.0.13
 		* 	0.0.2 - ajustement des calculs de mesure en mv ! memoire insufisante sdcard
@@ -29,7 +29,8 @@ M		* 	0.0.14 - commande frigo affectée sortie 9 pwm timer1
 		* 	0.0.5 - initialisation des moyennes (heure et 24 heures) à la valeur de la 1ere mesure
 		* 	modification de la carte suppression de la commande de puissance du frigo
 ---------------------------------------------------------------------------------------------------
-d		* 	0.1.0 - integation
+Md		* 	0.1.0 - integation
+		*	0.1.2 - version print valeur en debug
 		*	0.2.1 - mise en eprom des parametres
 
 	*/
@@ -90,10 +91,10 @@ uint8_t s_freq = 10 ;				// nombre d acquisition par minute periode 6s = 10
 const uint8_t analog_pin[ANALOG_COUNT] = {0, 2} ; //, 3, 1};
 const char* analog_name[ANALOG_COUNT] = {"VBat", "IBat" } ; //, "I_ext", "opt"};
 const char* ia_name[ANALOG_COUNT] = {"Am", "Ah" } ; //, "1ia_Min", "1iaH_moy"};
-const int analog_IMIN[ANALOG_COUNT] = { 0, -22250 } ; //, -16, -16};
-const int analog_IMAX[ANALOG_COUNT] = { 15000, 24000 } ; //, 16, 16};
+const int analog_IMIN[ANALOG_COUNT] = { 0, -11000 } ; //, -16, -16};
+const int analog_IMAX[ANALOG_COUNT] = { 15000, 11000 } ; //, 16, 16};
 long analog_value[ANALOG_COUNT] = {};
-int offset[ANALOG_COUNT] = {0, 0} ;		// offset pascan conpensation ecart a 0amp
+int offset[ANALOG_COUNT] = {0, -34} ;		// offset pascan conpensation ecart a 0amp
 int gain[ANALOG_COUNT] = {100, 100} ;		// * gain de correction ana / 100  (voie courant negative)
 
 // Variables :
@@ -152,15 +153,21 @@ void ana_get(){			// acquisition analogiques
 			Serial.print(F(" | "));
 		}
 		if ( i == 1){		//	mesure capteur de courant
-			val = map( val , 32, 1023, 480, -512);
+			val = map( val , 0, 1023, -512, 511);
 		}
 		
 		val += offset[i];
 		analog_value[i] +=  val;
 		if(debug){
 			Serial.print(val);
-			Serial.print(F(" ; "));
-			Serial.println();
+			Serial.print(F(" | "));
+			if ( i == 1){		//	mesure capteur de courant
+				Serial.print( map(val , -512, 511, analog_IMIN[i], analog_IMAX[i]) );
+			}
+			else {				//	mesure de tension
+				Serial.print( map(val , 0, 1023 , analog_IMIN[i], analog_IMAX[i]) );
+			}
+			Serial.println(" ; ");
 		}
 	}
 	
