@@ -21,23 +21,24 @@
 		* 	0.0.12 - calcul moyennes en pas CAN
 		* 	0.0.13 - commande frigo elect si reception i2c[8]
 		* 	0.0.14 - commande frigo affectée sortie 9 pwm timer1
--------------fusion programme désulfate en pas can-------------------------------------------------
-*		* 	0.0.1 - re-ecriture du programme de mesure de courant V0.0.13
+-------------scission programme désulfate en pas can-------------------------------------------------
+		* 	0.0.1 - re-ecriture du programme de mesure de courant V0.0.13
 		* 	0.0.2 - ajustement des calculs de mesure en mv ! memoire insufisante sdcard
 		* 	0.0.3 - stats de mesure en pas can 
 		* 	0.0.4 - suppression enregistrement sdcard 
 		* 	0.0.5 - initialisation des moyennes (heure et 24 heures) à la valeur de la 1ere mesure
+		* 	achat chargeur de batterie;
 		* 	modification de la carte suppression de la commande de puissance du frigo
----------------------------------------------------------------------------------------------------
-Md		* 	0.1.0 - integation
+-------------fusion programme désulfate en pas can-------------------------------------------------
+M		* 	0.1.0 - integation des modifications 
 		*	0.1.2 - version print valeur en debug
-		*	0.2.1 - mise en eprom des parametres
+d		*	0.2.0 - mise en eeprom des parametres
 
 	*/
 
 // programme :
 const char title[] = "Acq_data_I-stat";
-const char version[] = "0.1.0";
+const char version[] = "0.2.0";
 
 #include <Arduino.h>
 #include <string.h>
@@ -47,6 +48,8 @@ const char version[] = "0.1.0";
 #include <Time.h>         //http://www.arduino.cc/playground/Code/Time  
 #include <Wire.h>         //http://arduino.cc/en/Reference/Wire (included with Arduino IDE)
 #include <Streaming.h>        //http://arduiniana.org/libraries/streaming/
+#include <EEPROM.h>
+#include "EEPROMAnything.h"
 
 using namespace std;
 
@@ -60,7 +63,7 @@ using namespace std;
 	#define 		D6			//
 	#define 		D7			//
 	#define 		D8			// ledpin
-	#define 		D9			//
+	#define 		D9			// cdePin
 	#define 		D10			//
 	#define mosi	D11			// SPI SD	MOSI
 	#define miso	D12			// SPI SD	MISO
@@ -73,7 +76,7 @@ using namespace std;
 	#define scl	A5			// I2C rtc
 */
 
-#define ANALOG_COUNT 2
+#define CAPTEUR_COUNT 2
 
 const uint8_t ledPin = 8;			// the number of the LED pin
 const uint8_t cdePin = 9 ;		// numero de sortie de commande
@@ -86,26 +89,43 @@ const uint8_t MY_ADDRESS = 12;
 // nombre d acquisition par minute
 uint8_t s_freq = 10 ;				// nombre d acquisition par minute periode 6s = 10
 
-	// definition des parametres d entrees analogiques ( 1 voie)
-//const byte analog_pin[ANALOG_COUNT] = {0, 3} ; //, 2, 1};
-const uint8_t analog_pin[ANALOG_COUNT] = {0, 2} ; //, 3, 1};
-const char* analog_name[ANALOG_COUNT] = {"VBat", "IBat" } ; //, "I_ext", "opt"};
-const char* ia_name[ANALOG_COUNT] = {"Am", "Ah" } ; //, "1ia_Min", "1iaH_moy"};
-const int analog_IMIN[ANALOG_COUNT] = { 0, -11000 } ; //, -16, -16};
-const int analog_IMAX[ANALOG_COUNT] = { 15000, 11000 } ; //, 16, 16};
-long analog_value[ANALOG_COUNT] = {};
-int offset[ANALOG_COUNT] = {0, -34} ;		// offset pascan conpensation ecart a 0amp
-int gain[ANALOG_COUNT] = {100, 100} ;		// * gain de correction ana / 100  (voie courant negative)
+// ces valeurs sont sauvees en EEPROM
+const byte EEPROM_ID = 0x92 ;   // used to identify if valid data in EEPROM
+//constants used to identify EEPROM addresses
+const byte ID_ADDR = 0 ;		// the EEPROM address used to store the ID
+const byte CAPTEUR_ADDR = 1 ;	// adresse en eeprom de la structure capteur
+//valeur des variables en eeprom dans l'ordre de la structure capteur
+const int default_ANA0[] = { 0, 15000, 0, 1023, 0, 100} ;
+const int default_ANA1[] = { -11000, 11000, 0, 1023, -34, 100} ;
+
+// definition des parametres d entrees analogiques ( 1 voie)
+struct Capteur{
+	int analog_MIN_elec ;	// valeur elec min
+	int analog_MAX_elec ;	// valeur elec max
+	int MIN_can ;			// valeur min du can
+	int MAX_can ;			// valeur max du can
+	int offset ;			// offset pascan conpensation ecart a 0amp
+	int gain ;				// * gain de correction ana / 100  (voie courant negative)
+};
+
+Capteur* capteurs = (Capteur*) malloc (sizeof(Capteur) * CAPTEUR_COUNT) ;
+
+const uint8_t analog_pin[CAPTEUR_COUNT] = {0, 2} ; //, 3, 1};
+const char* analog_name[CAPTEUR_COUNT] = {"VBat", "IBat" } ; //, "I_ext", "opt"};
+long analog_value[CAPTEUR_COUNT] = {};
+
+/*const int analog_IMIN[CAPTEUR_COUNT] = { 0, -22250 } ; //, -16, -16};
+const int analog_IMAX[CAPTEUR_COUNT] = { 15000, 24000 } ; //, 16, 16};
+int offset[CAPTEUR_COUNT] = {0, 0} ;		// offset pascan conpensation ecart a 0amp
+int gain[CAPTEUR_COUNT] = {100, 100} ;		// * gain de correction ana / 100  (voie courant negative)
+*/
+
+const char* ia_name[CAPTEUR_COUNT] = {"Am", "Ah" } ; //, "1ia_Min", "1iaH_moy"};
 
 // Variables :
 bool debug = false ;   					// mode debug
 bool sflag = false ;   					// caractere 's' reçu => mise a l heure
-/**uint16_t inh[ANALOG_COUNT] [24] ;	// registre stat de data heure
-	long iam[2] [60] ;				// puissance moyenne / minute pour calculer la moyenne glissante
-	long iah[2] [24] ;					// puissance moyenne glissante en watt/heure
-	long iamsigma[2] ;					// somme des puissances/minutes
-	** utilisé pour 2 voie de calcul de puissance */
-int inm[ ANALOG_COUNT ] ;		// registre stat de data minute : moyenne ( cumul / s_freq )
+int inm[ CAPTEUR_COUNT ] ;		// registre stat de data minute : moyenne ( cumul / s_freq )
 int iam[60] = {0};				// courant moyen / minute pour calculer la moyenne glissante
 int iah[24] = {0};					// courant moyen glissant en ampere/heure
 long iamsigma = 0 ;				// somme des puissances/minutes
@@ -141,31 +161,33 @@ int freeRam () {
 } // end of freeRam 
 
 void ana_get(){			// acquisition analogiques
-	for(int i=0;i<=ANALOG_COUNT-1;i++){
+	for(int i=0;i<=CAPTEUR_COUNT-1;i++){
 		long val = analogReadPin(analog_pin[i]);
 		if(debug){
 			Serial.print(val);
 			Serial.print(F(" | "));
 		}
-		val = (val * gain[i]) / 100 ;
+		// valeur mesuree en pascan X par le gain
+		val = (val * capteurs[i].gain) / 100 ;
 		if(debug){
 			Serial.print(val);
 			Serial.print(F(" | "));
 		}
 		if ( i == 1){		//	mesure capteur de courant
-			val = map( val , 0, 1023, -512, 511);
+			//val = map( val , 0, 1023, -512, 511);
+			val = map( val , capteurs[i].MIN_can, capteurs[i].MAX_can, (capteurs[i].MIN_can) - 512, (capteurs[i].MAX_can) - 512);
 		}
-		
-		val += offset[i];
+		// valeur mesuree en pascan + offset
+		val += capteurs[i].offset;
 		analog_value[i] +=  val;
 		if(debug){
 			Serial.print(val);
 			Serial.print(F(" | "));
 			if ( i == 1){		//	mesure capteur de courant
-				Serial.print( map(val , -512, 511, analog_IMIN[i], analog_IMAX[i]) );
+				Serial.print( map(val , -512, 511, capteurs[i].analog_MIN_elec, capteurs[i].analog_MAX_elec) );
 			}
 			else {				//	mesure de tension
-				Serial.print( map(val , 0, 1023 , analog_IMIN[i], analog_IMAX[i]) );
+				Serial.print( map(val , 0, 1023 , capteurs[i].analog_MIN_elec, capteurs[i].analog_MAX_elec) );
 			}
 			Serial.println(" ; ");
 		}
@@ -242,11 +264,11 @@ byte get_list(char *liste){		//get list of variables
 	strcat(liste, "Date");
 	strcat(liste, ",");
 	*/
-	for(int i= 0;i<=ANALOG_COUNT-1;i++){
+	for(int i= 0;i<=CAPTEUR_COUNT-1;i++){
 		strcat(liste, analog_name[i]);
 		strcat(liste, ",");
 	}
-	for(int i= 0;i<=ANALOG_COUNT-1;i++){
+	for(int i= 0;i<=CAPTEUR_COUNT-1;i++){
 		strcat(liste, ia_name[i]);
 		strcat(liste, ",");
 	}
@@ -263,11 +285,11 @@ char* get_data(){		//get list of variables
 	
 	sprintf(liste, "%ld", t);
 	strcat(liste, ",");
-	for(int i= 0;i<=ANALOG_COUNT-1;i++){
+	for(int i= 0;i<=CAPTEUR_COUNT-1;i++){
 		strcat(liste, analog_name[i]);
 		strcat(liste, ",");
 	}
-	for(int i= 0;i<=ANALOG_COUNT-1;i++){
+	for(int i= 0;i<=CAPTEUR_COUNT-1;i++){
 		strcat(liste, ia_name[i]);
 		strcat(liste, ",");
 	}
@@ -384,28 +406,29 @@ void print_title (){
 void print2serial(char *bfr, int iam, int iah){
 
 	//Serial.print(F("freeRam : ")); 
-	//Serial.println(freeRam()); 
+	//Serial.println(freeRam());
 	
+	// impression de la date et heure
 	Serial.print(bfr) ;
 	Serial.print(F(",")) ;
-	// impression mesures de capteurs
-	for(int i=0;i<=ANALOG_COUNT-1;i++){
+	// impression mesures des capteurs
+	for(int i=0;i<=CAPTEUR_COUNT-1;i++){
 		if ( i == 1){		//	mesure capteur de courant
-			Serial.print( map(inm[i] , -512, 511, analog_IMIN[i], analog_IMAX[i]) );
+			Serial.print( map(inm[i] , -512, 511, capteurs[i].analog_MIN_elec, capteurs[i].analog_MAX_elec) );
 		}
 		else {				//	mesure de tension
-			Serial.print( map(inm[i] , 0, 1023 , analog_IMIN[i], analog_IMAX[i]) );
+			Serial.print( map(inm[i] , 0, 1023 , capteurs[i].analog_MIN_elec, capteurs[i].analog_MAX_elec) );
 		}
 		Serial.print(F(",")) ;
 	}
 	/** impression sommes des acquisitions minutes glissantes
 	Serial.print(map(iamsigma , 0, 61380, analog_IMIN[1], analog_IMAX[1]) ); 
-	Serial.print(F(",")) ;**/
-	// impression courant instantané minute
-	Serial.print( map(iam , -512, 511, analog_IMIN[1], analog_IMAX[1]) );
 	Serial.print(F(",")) ;
+	// impression courant instantané minute -- impression initile => copie inm[1]
+	Serial.print( map(iam , -512, 511, capteurs[i].MIN_can, capteurs[i].MAX_can) );
+	Serial.print(F(",")) ;**/
 	// impression moyenne glissante du courant sur 60 minutes
-	Serial.print( map(iah , -512, 511, analog_IMIN[1], analog_IMAX[1]) );
+	Serial.print( map(iah , -512, 511, capteurs[1].MIN_can, capteurs[1].MAX_can) );
 	Serial.print(F(",")) ;
 	//impression du cumul de capacité
 	Serial.print( cumuliah / 60) ;
@@ -414,15 +437,137 @@ void print2serial(char *bfr, int iam, int iah){
 	//Serial.println(freeRam()); 
 }// end of print2serial
 
+/**
+ * 	int analog_MIN_elec ;	// valeur elec min
+	int analog_MAX_elec ;	// valeur elec max
+	int MIN_can ;			// valeur min du can
+	int MAX_can ;			// valeur max du can
+	int offset ;			// offset pascan conpensation ecart a 0amp
+	int gain ;				// * gain de correction ana / 100  (voie courant negative)
+**/
+void print_code_integer(int index){
+	if (index ==0){Serial.print(F("ID EEPROM = ")) ;}
+	else if (index ==1){Serial.print("analog_MIN_elec_0 = ") ;}
+	else if (index == 3){Serial.print(F("analog_MAX_elec_0 = ")) ;}
+	else if (index == 5){Serial.print(F("MIN_can_0 = ")) ;}
+	else if (index == 7){Serial.print(F("MAX_can_0 = ")) ;}
+	else if (index == 9){Serial.print(F("offset_0 = ")) ;}
+	else if (index == 11){Serial.print(F("gain_0 = ")) ;}
+	else if (index == 13){Serial.print(F("analog_MIN_elec_1 = ")) ;}
+	else if (index == 15){Serial.print(F("analog_MAX_elec_1 = ")) ;}
+	else if (index == 17){Serial.print(F("MIN_can_1 = ")) ;}
+	else if (index == 19){Serial.print(F("MAX_can_1 = ")) ;}
+	else if (index == 21){Serial.print(F("offset_1 = ")) ;}
+	else if (index == 23){Serial.print(F("gain_1 = ")) ;}
+}	// End of print_code_integer
+
+void printEEPROM(){
+	int integer = 0;
+	byte octet = 0;
+	EEPROM_readAnything(ID_ADDR, octet);
+	Serial << F("EEPROM_ID attendu = ") << EEPROM_ID << F(" EEPROM_ID lu = ") << octet << endl;
+	if(octet == EEPROM_ID){
+		Serial << F("EEPROM_ID correct") << endl;
+	}
+	else{
+		Serial << F("erreur EEPROM_ID ") << octet << endl;
+	}
+	for (int i = 1; i <= 23; i+=2){
+		Serial.print(i);
+		print_code_integer(i) ;
+		EEPROM_readAnything(i, integer);
+		Serial.println(integer) ;
+	}
+
+}	// End of printEEPROM
+
+void printCapteurs(){
+	for (int k=0; k<=CAPTEUR_COUNT -1; k++){
+		Serial << F("analog_MIN_elec_0 = ") << capteurs[k].analog_MIN_elec << endl;
+		Serial << F("analog_MAX_elec_0 = ") << capteurs[k].analog_MAX_elec << endl;
+		Serial << F("MIN_can_0 = ") << capteurs[k].MIN_can << endl;
+		Serial << F("MAX_can_0 = ") << capteurs[k].MAX_can << endl;
+		Serial << F("offset_0 = ") << capteurs[k].offset << endl;
+		Serial << F("gain_0 = ") << capteurs[k].gain << endl;
+	}
+
+}	// End of printCapteurs
+
+// Write any data structure or variable to EEPROM
+int EEPROMAnythingWrite(int pos, char *zeichen, int lenge){
+	for (int i = 0; i < lenge; i++){
+		EEPROM.write(pos + i, *zeichen);
+		zeichen++;
+	}
+	return pos + lenge;
+}
+ 
+// Read any data structure or variable from EEPROM
+int EEPROMAnythingRead(int pos, char *zeichen, int lenge){
+	for (int i = 0; i < lenge; i++){
+		*zeichen = EEPROM.read(pos + i);
+		zeichen++;
+	}
+	return pos + lenge;
+}
+ 
 //			****	fin des sous programmes		****
 
-void setup(void){
+void setup(){
 
 	command = 0;		// commande provenant i2c
 	pinMode(ledPin, OUTPUT);
 	digitalWrite(ledPin, HIGH);		// turn the LED on (HIGH is the voltage level)
 	pinMode(cdePin, OUTPUT);
 	digitalWrite(cdePin, LOW);		// turn the LED on (HIGH is the voltage level)
+	Serial.begin(BAUD_RATE);		// initialize serial:
+	print_title () ;
+	setSyncProvider(RTC.get);
+	if (timeStatus() != timeSet){
+		Serial.print(F(" FAIL remote RTC!\n"));
+	}
+	byte id = 0 ;
+	int rc = 0 ;
+	Capteur capteur;
+	
+	EEPROM_readAnything(ID_ADDR, id);
+	Serial << F("EEPROM_ID attendu = ") << EEPROM_ID << F(" EEPROM_ID lu = ") << id << endl;
+	if(id == EEPROM_ID){
+		Serial << F("EEPROM_ID correct") << endl;
+		int addr = CAPTEUR_ADDR;
+		for (int k=0; k<=CAPTEUR_COUNT -1; k++){
+			// Read structure (struct) from EEPROM
+			//int nekst_free = EEPROMAnythingRead(addr, reinterpret_cast<char*>(&capteurs[k]), sizeof(capteur));
+			rc = EEPROM_readAnything(addr, capteur);
+			Serial << F("analog_MIN_elec_0 = ") << capteur.analog_MIN_elec << endl;
+			Serial << F("analog_MAX_elec_0 = ") << capteur.analog_MAX_elec << endl;
+			Serial << F("MIN_can_0 = ") << capteur.MIN_can << endl;
+			Serial << F("MAX_can_0 = ") << capteur.MAX_can << endl;
+			Serial << F("offset_0 = ") << capteur.offset << endl;
+			Serial << F("gain_0 = ") << capteur.gain << endl;
+
+			Serial << F("Lecture EEPROM = ") << rc << F(" Octets") << endl;
+			//memcpy ( capteurs[k], capteur, sizeof(capteur) );
+			addr += rc;
+		}
+	}
+	else {
+		Serial << F("erreur lecture EEPROM_ID = ") << id << endl;
+		int addr = CAPTEUR_ADDR;
+		int rc = EEPROM_writeAnything(ID_ADDR, EEPROM_ID);
+		rc = EEPROM_writeAnything(addr, default_ANA0);
+		Serial << F("copie EEPROM valeurs default_ANA0 ") << rc << " octets"<< endl;
+		memcpy ( &capteurs[0].analog_MIN_elec, &default_ANA0, sizeof(default_ANA0) );
+		addr = addr + sizeof(default_ANA0);
+		rc = EEPROM_writeAnything(addr, default_ANA1);
+		Serial << F("copie EEPROM valeurs default_ANA1 ") << rc << " octets"<< endl;
+		memcpy ( &capteurs[1].analog_MIN_elec, &default_ANA1, sizeof(default_ANA1) );
+		if(debug){
+			printEEPROM();
+			printCapteurs();
+		}
+	}
+
 	//initialisation arrays
 	ana_get() ;
 	for(int j=0;j<=59;j++){			// raz de la moyenne glissante de puissance 
@@ -432,12 +577,6 @@ void setup(void){
 	for(int i=0;i<=24-1;i++){
 		iah[i] = analog_value[1];
 	}
-	Serial.begin(BAUD_RATE);		// initialize serial:
-	print_title () ;
-	setSyncProvider(RTC.get);
-	if (timeStatus() != timeSet){
-		Serial.print(F(" FAIL remote RTC!\n"));
-	}
 	Wire.begin (MY_ADDRESS);
 	Wire.onReceive (receiveEvent);	// interrupt handler for incoming messages
 	Wire.onRequest (requestEvent);	// interrupt handler for when data is wanted
@@ -445,7 +584,6 @@ void setup(void){
 	Serial.print(F("i2c en reception port :"));
 	Serial.print(MY_ADDRESS);
 	Serial.print(F("\n"));
-	timber.oscillate(ledPin, 100, LOW, 10);
 	time_t t;
 	do{
 		t = now();
@@ -453,9 +591,9 @@ void setup(void){
 		Serial.print(F("."));
 	}while (second(t) != 0);
 	Serial.print(F("\n"));
-	Serial.print(F("Date Heure, Tension, Courant, ia_MoyMin,"));
+	timber.oscillate(ledPin, 100, LOW, 10);
+	Serial.print(F("Date , Tension, Courant,"));
 	Serial.print(F(" ia_MoyGlHeure, ia_CumulTotal\n"));
-	delay(500);
 
 	timber.pulse(ledPin, 500, LOW);
 
@@ -476,7 +614,7 @@ void loop(void){
 			}
 			if (second(t) == 0) {						// calculs des mesures moyenne / minute
 
-				for(int i=0;i<=ANALOG_COUNT-1;i++){
+				for(int i=0;i<=CAPTEUR_COUNT-1;i++){
 					inm[i] = analog_value[i] / s_freq;
 					analog_value[i] = 0 ;
 					if(debug){
@@ -537,12 +675,10 @@ void serialEvent() {
 			if (octet == 'h' or octet == '?'){
 				Serial.print(F("tapper : \n"));
 				Serial.print(F("h ou ? -> ce menu\n"));
-				Serial.print(F("b -> m/a frigo sur batterie\n"));
 				Serial.print(F("d -> debug - reglage\n"));
 				Serial.print(F("f -> frequence - fx\n"));
 				Serial.print(F("l -> liste des variables\n"));
-				Serial.print(F("g -> correction gain (gindex,x)\n"));
-				Serial.print(F("o -> correction offset (oindex,x)\n"));
+				Serial.print(F("g -> get/set val eeprom\r\n"));
 				Serial.print(F("p -> stat puissance 24H\n"));
 				Serial.print(F("m -> stat puissance Horaire\n"));
 				Serial.print(F("r -> reset avr\n"));
@@ -554,18 +690,6 @@ void serialEvent() {
 				Serial.print(F("tapper la date au format yy,mm,dd,hh,mm,ss,\n"));
 				if (Serial.available() >= 12){
 					set_rtcTime();
-				}
-			}
-			else if(octet == 'b'){
-				delay(5);
-				if (Serial.available() > 0){
-					int val = Serial.parseInt();
-					if (val == 0){
-						digitalWrite(cdePin, LOW);
-					}
-					else if (val == 1){
-						digitalWrite(cdePin, HIGH);
-					}
 				}
 			}
 			else if(octet == 'd'){
@@ -590,39 +714,41 @@ void serialEvent() {
 					Serial.println(s_freq);
 				}
 			}
-			else if (octet == 'o'){			//set offset
+			else if (octet == 'g'){
 				int index ;
-				delay(5);
-				 if (Serial.available() > 0){
+				byte octet ;
+				int integer ;
+				delay(  5);
+				if (Serial.available() > 0){		// index de donnee à lire present
 					index = Serial.parseInt();
-					Serial.print(index);
-					Serial.print(F(", "));
-					Serial.print(offset[index]);
-					Serial.print(F(" : "));
-					delay(5);
+					if (index == 0){
+						EEPROM_readAnything(index, octet);
+						Serial.println(octet, HEX) ;
+					}
+					else {							// lecture eeprom
+						EEPROM_readAnything(index, integer);
+						print_code_integer(index) ;
+						Serial.println(integer) ;
+					}
+					Serial.print(" : ");
+					delay(  5);
+					if (Serial.available() > 0){		// valeur de donnee à ecrire presente
+						int val = Serial.parseInt();
+						int rc = EEPROM_writeAnything(index, val);
+						EEPROM_readAnything(index, integer);
+						if (integer == val){
+							Serial.println(F("Enregistrement verifie :) ")) ;
+						}
+						else{
+							Serial.println(F("Erreur à l'enregistrement :( !!!!")) ;
+						}
+					}
 				}
-				if (Serial.available() > 0){
-					offset[index] = Serial.parseInt();
+				else {
+					printEEPROM();
+					printCapteurs();
 				}
-				Serial.print(offset[index]);
-				Serial.println();
-			}
-			else if (octet == 'g'){			//set gain
-				int index ;
-				delay(5);
-				if (Serial.available() > 0){
-					index = Serial.parseInt();
-					Serial.print(index);
-					Serial.print(F(", "));
-					Serial.print(gain[index]);
-					Serial.print(F(" : "));
-					delay(5);
-				}
-				if (Serial.available() > 0){
-					gain[index] = Serial.parseInt();
-				}
-				Serial.print(gain[index]);
-				Serial.println() ;
+				Serial.println(F(" tapper P pour activer Print_data ")) ;
 			}
 			else if (octet == 'r'){
 				resetFunc() ;  //call reset
