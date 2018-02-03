@@ -32,9 +32,9 @@
 -------------fusion programme désulfate en pas can-------------------------------------------------
 		* 	0.1.0 - integation des modifications 
 		*	0.1.2 - version print valeur en debug
-M		*	0.2.0 - mise en eeprom des parametres
+		*	0.2.0 - mise en eeprom des parametres
 		*	0.2.1 - mesure courant d'instrumentation
-d		* 	0.2.2 - initialisation de la moyenne à la 1 ere valeur de courant
+Md		* 	0.2.2 - initialisation de la moyenne à la 1 ere valeur de courant
 
 	*/
 
