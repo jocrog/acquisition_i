@@ -34,13 +34,13 @@
 		*	0.1.2 - version print valeur en debug
 		*	0.2.0 - mise en eeprom des parametres
 		*	0.2.1 - mesure courant d'instrumentation
-Md		* 	0.2.2 - initialisation de la moyenne à la 1 ere valeur de courant
-
+M		*	0.2.2 - initialisation de la moyenne à la 1 ere valeur de courant
+d		*	0.3.0 - ajout de la variable cumul instantané; cumul(s) en pascan * 60
 	*/
 
 // programme :
 const char title[] = "Acq_data_I-stat";
-const char version[] = "0.2.2";
+const char version[] = "0.3.0";
 
 #include <Arduino.h>
 #include <string.h>
@@ -92,7 +92,7 @@ const uint8_t MY_ADDRESS = 12;
 uint8_t s_freq = 10 ;				// nombre d acquisition par minute periode 6s = 10
 
 // ces valeurs sont sauvees en EEPROM
-const byte EEPROM_ID = 0x90 ;   // used to identify if valid data in EEPROM
+const byte EEPROM_ID = 0x89 ;   // used to identify if valid data in EEPROM
 //constants used to identify EEPROM addresses
 const int ID_ADDR = 0 ;		// the EEPROM address used to store the ID
 const int CAPTEUR_ADDR = 1 ;	// adresse en eeprom de la structure capteur
@@ -100,6 +100,7 @@ const int CAPTEUR_ADDR = 1 ;	// adresse en eeprom de la structure capteur
 const int default_ANA0[] = { 0, 15000, 0, 1024, 0, 100} ;
 const int default_ANA1[] = { -30000, 30000, -512, 512, 0, 100} ;
 const int default_ANA2[] = { -11000, 11000, -512, 512, -34, 100} ;
+const int default_cumul[] = { 4655, 4655, 4655, 4655} ;
 
 // definition des parametres d entrees analogiques ( 1 voie)
 struct Capteur{
@@ -132,9 +133,10 @@ int inm[ CAPTEUR_COUNT ] ;		// registre stat de data minute : moyenne ( cumul / 
 int iam[60] = {0};				// courant moyen / minute pour calculer la moyenne glissante
 int iah[24] = {0};					// courant moyen glissant en ampere/heure
 long iamsigma = 0 ;				// somme des puissances/minutes
-const long maxiah = 10000 ;		// capacité max batterie
-long cumuliah = 0 ;				// cumul energie
-uint8_t cdeVal = 127;			// valeur de la periode de la commande au demarrage
+long maxcumul = 0 ;		// valeur d ecretage du cumul => 100ah => 4654pascan x 60mn
+long cumuliahg = 0 ;		// cumul energie moyenne glissante ecrete 
+long cumuliah = 0 ;		// cumul energie instantannée 60mn ecrete init 6000 = 100ah x 60
+long cumuliaht = 0 ;		// cumul total non ecreté
 bool init0 = true;
 Timer timber;
 
@@ -150,6 +152,14 @@ enum {
 	CMD_READ_CUMULIA = 7,
 	CMD_ID = 9
 	};
+
+union mesure
+	{
+		byte bval[4] ;
+		unsigned int ival[2] ; 
+		unsigned long lval ;
+		float fval ;
+	} valeur ;
 
 char command;
 
@@ -262,8 +272,9 @@ byte get_list(char *liste){		//get list of variables
 		strcat(liste, ia_name[i]);
 		strcat(liste, ",");
 	}
-	strcat(liste, "cumulah");
+	strcat(liste, "cumuliahg");
 	strcat(liste, ",");
+	strcat(liste, "cumuliah");
 	strcat(liste, "\n");
 	return strlen(liste);
 } // end of get_list
@@ -369,9 +380,9 @@ void send_ia (byte valeur){
 		}
 	}
 	else if (valeur == CMD_READ_CUMULIA){
-		I2C_writeAnything (cumuliah);
+		I2C_writeAnything (cumuliahg);
 		if (debug){
-			Serial << F("CUMUL :") << cumuliah << endl;
+			Serial << F("CUMUL :") << cumuliahg << endl;
 		}
 	}
 } // end of send_ia
@@ -406,8 +417,9 @@ void print2serial(char *bfr, int iam, int iah){
 	// impression moyenne glissante du courant sur 60 minutes
 	Serial << map(iah , capteurs[canalI].MIN_can, capteurs[canalI].MAX_can, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec) << F(",");
 	//impression du cumul de capacité
-	Serial << cumuliah / 60 << F("\n");
-
+	Serial << map((cumuliahg / 60) , capteurs[canalI].MIN_can, capteurs[canalI].MAX_can, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec) << F(",");
+	Serial << map((cumuliah / 60) , capteurs[canalI].MIN_can, capteurs[canalI].MAX_can, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec) << F(",");
+	Serial << map((cumuliaht / 60) , capteurs[canalI].MIN_can, capteurs[canalI].MAX_can, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec) << F("\n");
 	//Serial.print(F("freeRam : ")); 
 	//Serial.println(freeRam()); 
 }// end of print2serial
@@ -440,6 +452,10 @@ void print_code_integer(int index){
 	else if (index == 31){Serial.print(F("MAX_can_2 = ")) ;}
 	else if (index == 33){Serial.print(F("offset_2 = ")) ;}
 	else if (index == 35){Serial.print(F("gain_2 = ")) ;}
+	else if (index == 37){Serial.print(F("maxcumul = ")) ;}
+	else if (index == 39){Serial.print(F("cumuliahg = ")) ;}
+	else if (index == 41){Serial.print(F("cumuliah = ")) ;}
+	else if (index == 43){Serial.print(F("cumuliaht = ")) ;}
 }	// End of print_code_integer
 
 void printEEPROM(){
@@ -459,7 +475,12 @@ void printEEPROM(){
 		EEPROM_readAnything(i, integer);
 		Serial.println(integer) ;
 	}
-
+	for (int i = 37; i <= 49; i+=4){
+		Serial.print(i);
+		print_code_integer(i) ;
+		EEPROM_readAnything(i, integer);
+		Serial.println(integer) ;
+	}
 }	// End of printEEPROM
 
 void printCapteurs(){
@@ -516,6 +537,10 @@ void setup(){
 	//EEPROM_readAnything(ID_ADDR, id);
 	id = EEPROM.read(ID_ADDR);
 	Serial << F("EEPROM_ID attendu = ") << EEPROM_ID << F(" EEPROM_ID lu = ") << id << endl;
+	if(id == 255){
+		id = EEPROM.read(0);
+		Serial << F("EEPROM_ID attendu = ") << EEPROM_ID << F(" EEPROM_ID lu = ") << id << endl;
+	}
 	if(id == EEPROM_ID){
 		Serial << F("EEPROM_ID correct") << endl;
 		int addr = CAPTEUR_ADDR;
@@ -534,11 +559,23 @@ void setup(){
 			memcpy ( &capteurs[k], &capteur, sizeof(capteur) );
 			addr += rc;
 		}
+		rc = EEPROM_readAnything(addr, maxcumul);
+		addr += rc;
+		maxcumul = maxcumul * 60;
+		rc = EEPROM_readAnything(addr, cumuliahg);
+		addr += rc;
+		cumuliahg = cumuliahg * 60;
+		rc = EEPROM_readAnything(addr, cumuliah);
+		addr += rc;
+		cumuliah = cumuliah * 60;
+		rc = EEPROM_readAnything(addr, cumuliaht);
+		cumuliaht = cumuliaht * 60;
+
 	}
 	else {
 		Serial << F("erreur lecture EEPROM_ID = ") << id << endl;
-		int addr = CAPTEUR_ADDR;
 		int rc = EEPROM_writeAnything(ID_ADDR, EEPROM_ID);
+		int addr = CAPTEUR_ADDR;
 		rc = EEPROM_writeAnything(addr, default_ANA0);
 		Serial << F("copie EEPROM valeurs default_ANA0 ") << rc << " octets"<< endl;
 		memcpy ( &capteurs[0].analog_MIN_elec, &default_ANA0, sizeof(default_ANA0) );
@@ -550,6 +587,13 @@ void setup(){
 		rc = EEPROM_writeAnything(addr, default_ANA2);
 		Serial << F("copie EEPROM valeurs default_ANA2 ") << rc << " octets"<< endl;
 		memcpy ( &capteurs[2].analog_MIN_elec, &default_ANA2, sizeof(default_ANA2) );
+		addr = addr + sizeof(default_ANA2);
+		rc = EEPROM_writeAnything(addr, default_cumul);
+		Serial << F("copie EEPROM valeurs default_cumul ") << rc << " octets"<< endl;
+		maxcumul = default_cumul[0] * 60 ;
+		cumuliahg = default_cumul[1] * 60 ;
+		cumuliah = default_cumul[2] * 60 ;
+		cumuliaht = default_cumul[3] * 60 ;
 		if(debug){
 			printEEPROM();
 			printCapteurs();
@@ -557,7 +601,20 @@ void setup(){
 	}
 
 	//initialisation arrays
-	ana_get() ;
+	Wire.begin (MY_ADDRESS);
+	Wire.onReceive (receiveEvent);	// interrupt handler for incoming messages
+	Wire.onRequest (requestEvent);	// interrupt handler for when data is wanted
+
+	Serial << F("i2c en reception port :") << MY_ADDRESS << endl;
+	time_t t;
+	do{
+		for(int i=0;i<=CAPTEUR_COUNT-1;i++){
+			analog_value[i] =  0;
+		}
+		ana_get() ;	// uncoup pour rire
+		Serial << F(".");
+		t = now();
+	}while (second(t) != 50);
 	long i_val = map(analog_value[canalI] , -512, 512, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec );
 	iamsigma = 0;
 	for(int j=0;j<=59;j++){			// raz de la moyenne glissante de puissance 
@@ -567,20 +624,14 @@ void setup(){
 	for(int i=0;i<=24-1;i++){
 		iah[i] = i_val;
 	}
-	Wire.begin (MY_ADDRESS);
-	Wire.onReceive (receiveEvent);	// interrupt handler for incoming messages
-	Wire.onRequest (requestEvent);	// interrupt handler for when data is wanted
-
-	Serial << F("i2c en reception port :") << MY_ADDRESS << endl;
-	time_t t;
 	do{
-		delay(250);
+		delay(100);
 		Serial << F(".");
 		t = now();
 	}while (second(t) != 0);
 	Serial << endl;
 	timber.oscillate(ledPin, 100, LOW, 10);
-	Serial<< F("Date , Tension, Inst, Courant, ia_MoyGlHeure, ia_CumulTotal\n") << endl;
+	Serial<< F("Date , Tension, Inst, Courant, ia_MoyGlHeure, ia_Cumulgl, ia_Cumul, ia_cumult\n") << endl;
 
 } // end of setup
 
@@ -607,21 +658,30 @@ void loop(void){
 					}
 				}
 				Serial << endl;
+				// tous les calculs restent en pascan
 				int minut = minute(t);
 				// capacité totale 60 minutes - ( ia vielle minute )
 				iamsigma = iamsigma - iam [minut] ;
 				// mise a jour capacité minute actuelle
-				iam[minut] = inm[canalI] ;		// Ampère / minute
+				iam[minut] = inm[canalI] ;		// Ampère / minute (pascan)
 				// capacité totale 59 minutes + ( ia nouvelle minute )
 				iamsigma = iamsigma + iam [minut] ;
 				int heure = hour();
 				//calcul capacité moyenne gissante horaire
 				iah[heure] = iamsigma  / 60 ;
-				//calcul capacité cumulée ah/mn
-				cumuliah += iah[heure]; // ajout de la capacité minute
+				//calcul capacité cumulée ah/mn (pascan)
+				cumuliahg += iah[heure];	// ajout de la capacité minute moyenne glissante (pascan)
+				cumuliah += iam[minut];		// ajout de la capacité minute (pascan)
+				cumuliaht += iam[minut];	// ajout de la capacité minute (pascan)
+				if(cumuliahg > maxcumul){
+					cumuliahg = maxcumul;
+				}
+				if(cumuliah > maxcumul){
+					cumuliah = maxcumul;
+				}
 				if(debug){
 					Serial << F("iamsigma : ") << iamsigma << F(" | iah_gl : ")
-							<< iah[heure] << F(" | cumuliah : ") << cumuliah << endl;
+							<< iah[heure] << F(" | cumuliahg : ") << cumuliahg << endl;
 					Serial.println() ;
 					for(int i=0;i<=60-1;i++){
 						Serial << F("|") << iam[i];
@@ -696,7 +756,7 @@ void serialEvent() {
 				int index ;
 				byte octet ;
 				int integer ;
-				delay(  5);
+				delay(5);
 				if (Serial.available() > 0){		// index de donnee à lire present
 					index = Serial.parseInt();
 					if (index == 0){
@@ -708,9 +768,9 @@ void serialEvent() {
 						print_code_integer(index) ;
 						Serial.println(integer) ;
 					}
-					Serial.print(" : ");
 					delay(  5);
 					if (Serial.available() > 0){		// valeur de donnee à ecrire presente
+						Serial.print(" : ");
 						int val = Serial.parseInt();
 						int rc = EEPROM_writeAnything(index, val);
 						EEPROM_readAnything(index, integer);
