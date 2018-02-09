@@ -35,12 +35,13 @@
 		*	0.2.0 - mise en eeprom des parametres
 		*	0.2.1 - mesure courant d'instrumentation
 M		*	0.2.2 - initialisation de la moyenne à la 1 ere valeur de courant
-d		*	0.3.0 - ajout de la variable cumul instantané; cumul(s) en pascan * 60
+		*	0.3.0 - ajout de la variable cumul instantané; cumul(s) en pascan * 60
+d		*	0.4.0 - mise en sram des variables de cumul
 	*/
 
 // programme :
 const char title[] = "Acq_data_I-stat";
-const char version[] = "0.3.0";
+const char version[] = "0.4.0";
 
 #include <Arduino.h>
 #include <string.h>
@@ -102,6 +103,24 @@ const int default_ANA1[] = { -30000, 30000, -512, 512, 0, 100} ;
 const int default_ANA2[] = { -11000, 11000, -512, 512, -34, 100} ;
 const int default_cumul[] = { 4655, 4655, 4655, 4655} ;
 
+long maxcumul = 279300 ;		// valeur d ecretage du cumul => 100ah => 4654pascan x 60mn
+//long cumuliahg = 0 ;		// cumul energie moyenne glissante ecrete 
+//long cumuliah = 0 ;		// cumul energie instantannée 60mn ecrete init 6000 = 100ah x 60
+//long cumuliaht = 0 ;		// cumul total non ecreté
+
+union configUnion{
+	uint8_t    byte[16]; // match the below struct...
+	struct {
+		long cumuliahg;
+		long cumuliah;
+		long cumuliaht;
+		long chksum;
+	} val ;
+//} config  __attribute__ ( (section ("NoInit"),zero_init) );
+} config  __attribute__ ( (section (".noinit"),zero_init) );
+
+//unsigned long NI_longVar __attribute__( ( section( "NoInit"),zero_init) ) ;
+
 // definition des parametres d entrees analogiques ( 1 voie)
 struct Capteur{
 	int analog_MIN_elec ;	// valeur elec min
@@ -133,10 +152,6 @@ int inm[ CAPTEUR_COUNT ] ;		// registre stat de data minute : moyenne ( cumul / 
 int iam[60] = {0};				// courant moyen / minute pour calculer la moyenne glissante
 int iah[24] = {0};					// courant moyen glissant en ampere/heure
 long iamsigma = 0 ;				// somme des puissances/minutes
-long maxcumul = 0 ;		// valeur d ecretage du cumul => 100ah => 4654pascan x 60mn
-long cumuliahg = 0 ;		// cumul energie moyenne glissante ecrete 
-long cumuliah = 0 ;		// cumul energie instantannée 60mn ecrete init 6000 = 100ah x 60
-long cumuliaht = 0 ;		// cumul total non ecreté
 bool init0 = true;
 Timer timber;
 
@@ -176,21 +191,24 @@ int freeRam () {
 void ana_get(){			// acquisition analogiques
 	for(int i=0;i<=CAPTEUR_COUNT-1;i++){
 		long val = analogReadPin(analog_pin[i]);
-		if(debug){
+		/*if(debug){
 			Serial << val << F(" | ");
 		}
+		*/ 
 		// valeur mesuree en pascan X par le gain
 		val = (val * capteurs[i].gain) / 100 ;
-		if(debug){
+		/*if(debug){
 			Serial << val << F(" | ");
 		}
+		*/ 
 		// recallage du CAN arduino avec echelle en eeprom
 		val = map( val , 0, 1024, (capteurs[i].MIN_can), (capteurs[i].MAX_can));
 		val += capteurs[i].offset;
 		analog_value[i] +=  val;
-		if(debug){
+		/*if(debug){
 			Serial << val << F(" | ") << map(val , capteurs[i].MIN_can, capteurs[i].MAX_can, capteurs[i].analog_MIN_elec, capteurs[i].analog_MAX_elec) << endl;
 		}
+		*/
 	}
 	
 } // end of ana_get 
@@ -380,9 +398,9 @@ void send_ia (byte valeur){
 		}
 	}
 	else if (valeur == CMD_READ_CUMULIA){
-		I2C_writeAnything (cumuliahg);
+		I2C_writeAnything (config.val.cumuliahg);
 		if (debug){
-			Serial << F("CUMUL :") << cumuliahg << endl;
+			Serial << F("CUMUL :") << config.val.cumuliahg << endl;
 		}
 	}
 } // end of send_ia
@@ -417,9 +435,9 @@ void print2serial(char *bfr, int iam, int iah){
 	// impression moyenne glissante du courant sur 60 minutes
 	Serial << map(iah , capteurs[canalI].MIN_can, capteurs[canalI].MAX_can, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec) << F(",");
 	//impression du cumul de capacité
-	Serial << map((cumuliahg / 60) , capteurs[canalI].MIN_can, capteurs[canalI].MAX_can, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec) << F(",");
-	Serial << map((cumuliah / 60) , capteurs[canalI].MIN_can, capteurs[canalI].MAX_can, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec) << F(",");
-	Serial << map((cumuliaht / 60) , capteurs[canalI].MIN_can, capteurs[canalI].MAX_can, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec) << F("\n");
+	Serial << map((config.val.cumuliahg / 60) , capteurs[canalI].MIN_can, capteurs[canalI].MAX_can, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec) << F(",");
+	Serial << map((config.val.cumuliah / 60) , capteurs[canalI].MIN_can, capteurs[canalI].MAX_can, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec) << F(",");
+	Serial << map((config.val.cumuliaht / 60) , capteurs[canalI].MIN_can, capteurs[canalI].MAX_can, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec) << F("\n");
 	//Serial.print(F("freeRam : ")); 
 	//Serial.println(freeRam()); 
 }// end of print2serial
@@ -452,10 +470,6 @@ void print_code_integer(int index){
 	else if (index == 31){Serial.print(F("MAX_can_2 = ")) ;}
 	else if (index == 33){Serial.print(F("offset_2 = ")) ;}
 	else if (index == 35){Serial.print(F("gain_2 = ")) ;}
-	else if (index == 37){Serial.print(F("maxcumul = ")) ;}
-	else if (index == 39){Serial.print(F("cumuliahg = ")) ;}
-	else if (index == 41){Serial.print(F("cumuliah = ")) ;}
-	else if (index == 43){Serial.print(F("cumuliaht = ")) ;}
 }	// End of print_code_integer
 
 void printEEPROM(){
@@ -512,6 +526,14 @@ int EEPROMAnythingRead(int pos, char *zeichen, int lenge){
 	}
 	return pos + lenge;
 }
+
+uint16_t getchksum() {
+	long sum = 0;
+	for (int position = 0; position < (sizeof(config) - sizeof(config.val.chksum)); position++) {
+		sum = sum + config.byte[position];
+	}
+	return sum;
+}
  
 //			****	fin des sous programmes		****
 
@@ -525,7 +547,6 @@ void setup(){
 	Serial.begin(BAUD_RATE);		// initialize serial:
 	print_title () ;
 	Serial.print(F("attente stabilisation de tension.\n"));
-	delay(10000);		// delay de 10 secondes pour etablissement de tension
 	setSyncProvider(RTC.get);
 	if (timeStatus() != timeSet){
 		Serial.print(F(" FAIL remote RTC!\n"));
@@ -533,7 +554,28 @@ void setup(){
 	byte id ;
 	int rc = 0 ;
 	Capteur capteur;
-	
+	long sum = getchksum();
+	Serial << F("sum : ") << sum << F("; checksum : ") << config.val.chksum << endl;
+	if(sum != config.val.chksum or sum == 0){	//	c'est un demarrage à froid
+		Serial << F("demarrage a froid ") << endl;
+		long val = default_cumul[1] ;
+		val = val * 60;
+		config.val.cumuliahg = val;
+		val = default_cumul[2];
+		val = val * 60;
+		config.val.cumuliah = val ;
+		val = default_cumul[2];
+		val = val * 60;
+		config.val.cumuliaht = val ;
+		config.val.chksum = getchksum();
+	}
+	// valeurs de cumul au demarrage
+	Serial << F("param maxcumul : ") << maxcumul << endl;
+	Serial << F("param cumuliahg : ") << config.val.cumuliahg << endl;
+	Serial << F("param cumuliah : ") << config.val.cumuliah << endl;
+	Serial << F("param cumuliaht : ") << config.val.cumuliaht << endl;
+	Serial << F("param chksum : ") << config.val.chksum << endl;
+
 	//EEPROM_readAnything(ID_ADDR, id);
 	id = EEPROM.read(ID_ADDR);
 	Serial << F("EEPROM_ID attendu = ") << EEPROM_ID << F(" EEPROM_ID lu = ") << id << endl;
@@ -554,46 +596,27 @@ void setup(){
 			Serial << F("MAX_can_0 = ") << capteur.MAX_can << endl;
 			Serial << F("offset_0 = ") << capteur.offset << endl;
 			Serial << F("gain_0 = ") << capteur.gain << endl;
-
 			Serial << F("Lecture EEPROM = ") << rc << F(" Octets") << endl;
 			memcpy ( &capteurs[k], &capteur, sizeof(capteur) );
-			addr += rc;
 		}
-		rc = EEPROM_readAnything(addr, maxcumul);
-		addr += rc;
-		maxcumul = maxcumul * 60;
-		rc = EEPROM_readAnything(addr, cumuliahg);
-		addr += rc;
-		cumuliahg = cumuliahg * 60;
-		rc = EEPROM_readAnything(addr, cumuliah);
-		addr += rc;
-		cumuliah = cumuliah * 60;
-		rc = EEPROM_readAnything(addr, cumuliaht);
-		cumuliaht = cumuliaht * 60;
-
 	}
 	else {
-		Serial << F("erreur lecture EEPROM_ID = ") << id << endl;
+		/*Serial << F("erreur lecture EEPROM_ID = ") << id << endl;
 		int rc = EEPROM_writeAnything(ID_ADDR, EEPROM_ID);
 		int addr = CAPTEUR_ADDR;
 		rc = EEPROM_writeAnything(addr, default_ANA0);
 		Serial << F("copie EEPROM valeurs default_ANA0 ") << rc << " octets"<< endl;
-		memcpy ( &capteurs[0].analog_MIN_elec, &default_ANA0, sizeof(default_ANA0) );
 		addr = addr + sizeof(default_ANA0);
 		rc = EEPROM_writeAnything(addr, default_ANA1);
 		Serial << F("copie EEPROM valeurs default_ANA1 ") << rc << " octets"<< endl;
-		memcpy ( &capteurs[1].analog_MIN_elec, &default_ANA1, sizeof(default_ANA1) );
 		addr = addr + sizeof(default_ANA1);
 		rc = EEPROM_writeAnything(addr, default_ANA2);
 		Serial << F("copie EEPROM valeurs default_ANA2 ") << rc << " octets"<< endl;
-		memcpy ( &capteurs[2].analog_MIN_elec, &default_ANA2, sizeof(default_ANA2) );
 		addr = addr + sizeof(default_ANA2);
-		rc = EEPROM_writeAnything(addr, default_cumul);
-		Serial << F("copie EEPROM valeurs default_cumul ") << rc << " octets"<< endl;
-		maxcumul = default_cumul[0] * 60 ;
-		cumuliahg = default_cumul[1] * 60 ;
-		cumuliah = default_cumul[2] * 60 ;
-		cumuliaht = default_cumul[3] * 60 ;
+		*/
+		memcpy ( &capteurs[0].analog_MIN_elec, &default_ANA0, sizeof(default_ANA0) );
+		memcpy ( &capteurs[1].analog_MIN_elec, &default_ANA1, sizeof(default_ANA1) );
+		memcpy ( &capteurs[2].analog_MIN_elec, &default_ANA2, sizeof(default_ANA2) );
 		if(debug){
 			printEEPROM();
 			printCapteurs();
@@ -670,18 +693,27 @@ void loop(void){
 				//calcul capacité moyenne gissante horaire
 				iah[heure] = iamsigma  / 60 ;
 				//calcul capacité cumulée ah/mn (pascan)
-				cumuliahg += iah[heure];	// ajout de la capacité minute moyenne glissante (pascan)
-				cumuliah += iam[minut];		// ajout de la capacité minute (pascan)
-				cumuliaht += iam[minut];	// ajout de la capacité minute (pascan)
-				if(cumuliahg > maxcumul){
-					cumuliahg = maxcumul;
+				long sum = getchksum();
+				if (sum != config.val.chksum){
+					Serial << F("erreur config.val.chksum : ")<< config.val.chksum << F("sum : ") << sum << endl;
 				}
-				if(cumuliah > maxcumul){
-					cumuliah = maxcumul;
+				config.val.cumuliahg += iah[heure];	// ajout de la capacité minute moyenne glissante (pascan)
+				config.val.cumuliah += iam[minut];		// ajout de la capacité minute (pascan)
+				config.val.cumuliaht += iam[minut];	// ajout de la capacité minute (pascan)
+				if(config.val.cumuliahg > maxcumul){
+					config.val.cumuliahg = maxcumul;
 				}
+				if(config.val.cumuliah > maxcumul){
+					config.val.cumuliah = maxcumul;
+				}
+				config.val.chksum = getchksum();
 				if(debug){
+					Serial << F("param cumuliahg : ") << config.val.cumuliahg << endl;
+					Serial << F("param cumuliah : ") << config.val.cumuliah << endl;
+					Serial << F("param cumuliaht : ") << config.val.cumuliaht << endl;
+					Serial << F("param chksum : ") << config.val.chksum << endl;
 					Serial << F("iamsigma : ") << iamsigma << F(" | iah_gl : ")
-							<< iah[heure] << F(" | cumuliahg : ") << cumuliahg << endl;
+							<< iah[heure] << F(" | cumuliahg : ") << config.val.chksum << endl;
 					Serial.println() ;
 					for(int i=0;i<=60-1;i++){
 						Serial << F("|") << iam[i];
