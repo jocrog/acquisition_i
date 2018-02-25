@@ -34,14 +34,16 @@
 		*	0.1.2 - version print valeur en debug
 		*	0.2.0 - mise en eeprom des parametres
 		*	0.2.1 - mesure courant d'instrumentation
-M		*	0.2.2 - initialisation de la moyenne à la 1 ere valeur de courant
+		*	0.2.2 - initialisation de la moyenne à la 1 ere valeur de courant
 		*	0.3.0 - ajout de la variable cumul instantané; cumul(s) en pascan * 60
-d		*	0.4.0 - mise en sram des variables de cumul
+		*	0.4.0 - mise en sram des variables de cumul
+		*	0.4.1 - resolution de cumul * 60
+Md		*	0.4.2 - correction lecture eeprom et setup demarrage minute pleine
 	*/
 
 // programme :
 const char title[] = "Acq_data_I-stat";
-const char version[] = "0.4.0";
+const char version[] = "0.4.2";
 
 #include <Arduino.h>
 #include <string.h>
@@ -108,6 +110,7 @@ long maxcumul = 279300 ;		// valeur d ecretage du cumul => 100ah => 4654pascan x
 //long cumuliah = 0 ;		// cumul energie instantannée 60mn ecrete init 6000 = 100ah x 60
 //long cumuliaht = 0 ;		// cumul total non ecreté
 
+//	mise en memoire non init des valeurs de cumul pour redemarrage
 union configUnion{
 	uint8_t    byte[16]; // match the below struct...
 	struct {
@@ -116,8 +119,8 @@ union configUnion{
 		long cumuliaht;
 		long chksum;
 	} val ;
-//} config  __attribute__ ( (section ("NoInit"),zero_init) );
-} config  __attribute__ ( (section (".noinit"),zero_init) );
+
+} config  __attribute__ ( (section (".noinit") ) );
 
 //unsigned long NI_longVar __attribute__( ( section( "NoInit"),zero_init) ) ;
 
@@ -137,13 +140,7 @@ const uint8_t analog_pin[CAPTEUR_COUNT] = {0, 1, 2} ; 					//, 3};
 const char* analog_name[CAPTEUR_COUNT] = {"VBat", "Inst", "IBat" } ;	//, "I_ext"};
 long analog_value[CAPTEUR_COUNT] = {};
 
-/*const int analog_IMIN[CAPTEUR_COUNT] = { 0, -22250 } ; //, -16, -16};
-const int analog_IMAX[CAPTEUR_COUNT] = { 15000, 24000 } ; //, 16, 16};
-int offset[CAPTEUR_COUNT] = {0, 0} ;		// offset pascan conpensation ecart a 0amp
-int gain[CAPTEUR_COUNT] = {100, 100} ;		// * gain de correction ana / 100  (voie courant negative)
-*/
-
-const char* ia_name[CAPTEUR_COUNT] = {"Am", "Ah" } ; //, "1ia_Min", "1iaH_moy"};
+const char* ia_name[2] = {"Am", "Ah" } ; //, "1ia_Min", "1iaH_moy"};
 
 // Variables :
 bool debug = false ;   					// mode debug
@@ -152,7 +149,7 @@ int inm[ CAPTEUR_COUNT ] ;		// registre stat de data minute : moyenne ( cumul / 
 int iam[60] = {0};				// courant moyen / minute pour calculer la moyenne glissante
 int iah[24] = {0};					// courant moyen glissant en ampere/heure
 long iamsigma = 0 ;				// somme des puissances/minutes
-bool init0 = true;
+bool init0 = false;
 Timer timber;
 
 // various commands we might get
@@ -191,24 +188,24 @@ int freeRam () {
 void ana_get(){			// acquisition analogiques
 	for(int i=0;i<=CAPTEUR_COUNT-1;i++){
 		long val = analogReadPin(analog_pin[i]);
-		/*if(debug){
+		if(debug){
 			Serial << val << F(" | ");
 		}
-		*/ 
+		
 		// valeur mesuree en pascan X par le gain
 		val = (val * capteurs[i].gain) / 100 ;
-		/*if(debug){
+		if(debug){
 			Serial << val << F(" | ");
 		}
-		*/ 
+		
 		// recallage du CAN arduino avec echelle en eeprom
 		val = map( val , 0, 1024, (capteurs[i].MIN_can), (capteurs[i].MAX_can));
 		val += capteurs[i].offset;
 		analog_value[i] +=  val;
-		/*if(debug){
+		if(debug){
 			Serial << val << F(" | ") << map(val , capteurs[i].MIN_can, capteurs[i].MAX_can, capteurs[i].analog_MIN_elec, capteurs[i].analog_MAX_elec) << endl;
 		}
-		*/
+		
 	}
 	
 } // end of ana_get 
@@ -275,46 +272,23 @@ void set_rtcTime(){		//set rtc time
 } // end of set_rtcTime
 
 byte get_list(char *liste){		//get list of variables
-	/*strcpy (liste, "Labels") ;
-	strcat(liste, ",");
-	strcat(liste, "TimeIndex");
-	strcat(liste, ",");
-	strcat(liste, "Date");
-	strcat(liste, ",");
-	*/
+	
 	for(int i= 0;i<=CAPTEUR_COUNT-1;i++){
 		strcat(liste, analog_name[i]);
 		strcat(liste, ",");
 	}
-	for(int i= 0;i<=CAPTEUR_COUNT-1;i++){
+	for(int i= 0;i<=1;i++){
 		strcat(liste, ia_name[i]);
 		strcat(liste, ",");
 	}
 	strcat(liste, "cumuliahg");
 	strcat(liste, ",");
 	strcat(liste, "cumuliah");
+	strcat(liste, ",");
+	strcat(liste, "cumuliaht");
 	strcat(liste, "\n");
 	return strlen(liste);
 } // end of get_list
-
-char* get_data(){		//get list of variables
-	char liste [64];
-
-	unsigned long t = now();
-	
-	sprintf(liste, "%ld", t);
-	strcat(liste, ",");
-	for(int i= 0;i<=CAPTEUR_COUNT-1;i++){
-		strcat(liste, analog_name[i]);
-		strcat(liste, ",");
-	}
-	for(int i= 0;i<=CAPTEUR_COUNT-1;i++){
-		strcat(liste, ia_name[i]);
-		strcat(liste, ",");
-	}
-	strcat(liste, "\n");
-	return liste;
-} // end of get_data
 
 char* digitalClockDisplay(char* buffer){
 	int jour = day();
@@ -546,12 +520,10 @@ void setup(){
 	digitalWrite(cdePin, LOW);		// turn the LED on (HIGH is the voltage level)
 	Serial.begin(BAUD_RATE);		// initialize serial:
 	print_title () ;
-	Serial.print(F("attente stabilisation de tension.\n"));
 	setSyncProvider(RTC.get);
 	if (timeStatus() != timeSet){
 		Serial.print(F(" FAIL remote RTC!\n"));
 	}
-	byte id ;
 	int rc = 0 ;
 	Capteur capteur;
 	long sum = getchksum();
@@ -559,14 +531,11 @@ void setup(){
 	if(sum != config.val.chksum or sum == 0){	//	c'est un demarrage à froid
 		Serial << F("demarrage a froid ") << endl;
 		long val = default_cumul[1] ;
-		val = val * 60;
-		config.val.cumuliahg = val;
+		config.val.cumuliahg = val * 60;
 		val = default_cumul[2];
-		val = val * 60;
-		config.val.cumuliah = val ;
+		config.val.cumuliah = val * 60;
 		val = default_cumul[2];
-		val = val * 60;
-		config.val.cumuliaht = val ;
+		config.val.cumuliaht = val * 60;
 		config.val.chksum = getchksum();
 	}
 	// valeurs de cumul au demarrage
@@ -577,7 +546,7 @@ void setup(){
 	Serial << F("param chksum : ") << config.val.chksum << endl;
 
 	//EEPROM_readAnything(ID_ADDR, id);
-	id = EEPROM.read(ID_ADDR);
+	byte id = EEPROM.read(ID_ADDR);
 	Serial << F("EEPROM_ID attendu = ") << EEPROM_ID << F(" EEPROM_ID lu = ") << id << endl;
 	if(id == 255){
 		id = EEPROM.read(0);
@@ -598,10 +567,11 @@ void setup(){
 			Serial << F("gain_0 = ") << capteur.gain << endl;
 			Serial << F("Lecture EEPROM = ") << rc << F(" Octets") << endl;
 			memcpy ( &capteurs[k], &capteur, sizeof(capteur) );
+			addr = addr + sizeof(capteur);
 		}
 	}
 	else {
-		/*Serial << F("erreur lecture EEPROM_ID = ") << id << endl;
+		Serial << F("erreur lecture EEPROM_ID = ") << id << endl;
 		int rc = EEPROM_writeAnything(ID_ADDR, EEPROM_ID);
 		int addr = CAPTEUR_ADDR;
 		rc = EEPROM_writeAnything(addr, default_ANA0);
@@ -613,7 +583,7 @@ void setup(){
 		rc = EEPROM_writeAnything(addr, default_ANA2);
 		Serial << F("copie EEPROM valeurs default_ANA2 ") << rc << " octets"<< endl;
 		addr = addr + sizeof(default_ANA2);
-		*/
+		
 		memcpy ( &capteurs[0].analog_MIN_elec, &default_ANA0, sizeof(default_ANA0) );
 		memcpy ( &capteurs[1].analog_MIN_elec, &default_ANA1, sizeof(default_ANA1) );
 		memcpy ( &capteurs[2].analog_MIN_elec, &default_ANA2, sizeof(default_ANA2) );
@@ -629,30 +599,27 @@ void setup(){
 	Wire.onRequest (requestEvent);	// interrupt handler for when data is wanted
 
 	Serial << F("i2c en reception port :") << MY_ADDRESS << endl;
+	Serial.print(F("attente 1 minute d acquisitions\n"));
 	time_t t;
 	do{
 		for(int i=0;i<=CAPTEUR_COUNT-1;i++){
 			analog_value[i] =  0;
 		}
 		ana_get() ;	// uncoup pour rire
+		iamsigma = 0;
+		for(int j=0;j<=59;j++){			// raz de la moyenne glissante de puissance 
+			iam [j] = analog_value[canalI] ;
+			iamsigma += analog_value[canalI] ;
+		}
+		for(int i=0;i<=24-1;i++){
+			iah[i] = analog_value[canalI];
+		}
 		Serial << F(".");
 		t = now();
-	}while (second(t) != 50);
-	long i_val = map(analog_value[canalI] , -512, 512, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec );
-	iamsigma = 0;
-	for(int j=0;j<=59;j++){			// raz de la moyenne glissante de puissance 
-		iam [j] = analog_value[canalI] ;
-		iamsigma += analog_value[canalI] ;
-	}
-	for(int i=0;i<=24-1;i++){
-		iah[i] = i_val;
-	}
-	do{
-		delay(100);
-		Serial << F(".");
-		t = now();
-	}while (second(t) != 0);
+	}while (second(t) !=0);
+	//Serial << F("analog_value[canalI] :") << analog_value[canalI] << endl;
 	Serial << endl;
+	init0 = true;
 	timber.oscillate(ledPin, 100, LOW, 10);
 	Serial<< F("Date , Tension, Inst, Courant, ia_MoyGlHeure, ia_Cumulgl, ia_Cumul, ia_cumult\n") << endl;
 
@@ -745,6 +712,7 @@ void serialEvent() {
 			if (octet == 'h' or octet == '?'){
 				Serial.print(F("tapper : \n"));
 				Serial.print(F("h ou ? -> ce menu\n"));
+				Serial.print(F("c -> reset - cumuls\n"));
 				Serial.print(F("d -> debug - reglage\n"));
 				Serial.print(F("f -> frequence - fx\n"));
 				Serial.print(F("l -> liste des variables\n"));
@@ -757,7 +725,7 @@ void serialEvent() {
 			}
 			else if(octet == 's'){
 				sflag = true;
-				Serial.print(F("tapper la date au format yy,mm,dd,hh,mm,ss,\n"));
+				Serial << F("tapper la date au format yy,mm,dd,hh,mm,ss") << endl;
 				if (Serial.available() >= 12){
 					set_rtcTime();
 				}
@@ -772,6 +740,17 @@ void serialEvent() {
 				char* bfr = buffer ;
 				get_list(bfr);
 				Serial.println(buffer) ;
+			}
+			else if(octet == 'c'){
+				// reset cumuls
+				long val = default_cumul[1] ;
+				config.val.cumuliahg = val * 60;
+				val = default_cumul[2];
+				config.val.cumuliah = val * 60;
+				val = default_cumul[2];
+				config.val.cumuliaht = val * 60;
+				config.val.chksum = getchksum();
+				resetFunc() ;  //call reset
 			}
 			else if(octet == 'f'){
 				delay(5);
