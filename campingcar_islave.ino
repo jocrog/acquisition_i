@@ -38,12 +38,13 @@
 		*	0.3.0 - ajout de la variable cumul instantané; cumul(s) en pascan * 60
 		*	0.4.0 - mise en sram des variables de cumul
 		*	0.4.1 - resolution de cumul * 60
-Md		*	0.4.2 - correction lecture eeprom et setup demarrage minute pleine
+M		*	0.4.2 - correction lecture eeprom et setup demarrage minute pleine
+d		*	0.4.3 - suppression des adherences wire
 	*/
 
 // programme :
 const char title[] = "Acq_data_I-stat";
-const char version[] = "0.4.2";
+const char version[] = "0.4.3";
 
 #include <Arduino.h>
 #include <string.h>
@@ -51,7 +52,6 @@ const char version[] = "0.4.2";
 #include "Timer.h"
 #include <DS3232RTC.h>    //http://github.com/JChristensen/DS3232RTC
 #include <Time.h>         //http://www.arduino.cc/playground/Code/Time  
-#include <Wire.h>         //http://arduino.cc/en/Reference/Wire (included with Arduino IDE)
 #include <Streaming.h>        //http://arduiniana.org/libraries/streaming/
 #include <EEPROM.h>
 #include "EEPROMAnything.h"
@@ -68,7 +68,7 @@ using namespace std;
 	#define 		D6			//
 	#define 		D7			//
 	#define 		D8			// ledpin
-	#define 		D9			// cdePin
+	#define 		D9			//
 	#define 		D10			//
 	#define mosi	D11			// SPI SD	MOSI
 	#define miso	D12			// SPI SD	MISO
@@ -84,7 +84,6 @@ using namespace std;
 #define CAPTEUR_COUNT 3
 
 const uint8_t ledPin = 8;			// the number of the LED pin
-const uint8_t cdePin = 9 ;		// numero de sortie de commande
 
 const unsigned int BAUD_RATE = 19200 ;
 
@@ -302,82 +301,6 @@ char* digitalClockDisplay(char* buffer){
 	return buffer ;
 } // end of digitalClockDisplay
 
-void receiveEvent (int howMany){
-	command = Wire.read ();  // remember command for when we get request
-} // end of receiveEvent
-
-void requestEvent (){
-
-	switch (command)
-		{
-	/**	CMD_LIST_LENGTH = 1,
-		CMD_LIST = 2,
-		CMD_READ_VBAT = 3,
-		CMD_READ_IBAT = 4,
-		CMD_READ_iaM = 5,
-		CMD_READ_iaH = 6,
-		CMD_READ_CUMULia = 7
-		CMD_ID = 9
-	*/
-		case CMD_LIST_LENGTH : {
-			char buffer[32] ;
-			char* bfr = buffer ;
-			byte rc = get_list(bfr) ;
-			Wire.write (rc);					// send list length
-			break;
-		}
-		case CMD_LIST : {
-			char buffer[32] ;
-			char* bfr = buffer ;
-			byte rc = get_list(bfr) ;
-			Wire.write (bfr);					// send list length
-			break;
-		}
-		case CMD_READ_VBAT: send_ia (CMD_READ_VBAT); break;			// send VBAT
-		case CMD_READ_IBAT: send_ia (CMD_READ_IBAT); break;			// send IBAT
-		case CMD_READ_IAM: send_ia (CMD_READ_IAM); break;			// send iaM
-		case CMD_READ_IAH: send_ia (CMD_READ_IAH); break;			// send iaH
-		case CMD_READ_CUMULIA: send_ia (CMD_READ_CUMULIA); break;	// send CUMULia
-		case CMD_ID: Wire.write (MY_ADDRESS);	break;				// send id
-		}  // end of switch
-	}  // end of requestEvent
-
-void send_ia (byte valeur){
-
-	if (valeur == CMD_READ_VBAT){
-		I2C_writeAnything (inm[0]);
-		if (debug){
-			Serial << F("VBAT :") << inm[0] << endl;
-		}
-	}
-	else if (valeur == CMD_READ_IBAT){
-		I2C_writeAnything (inm[canalI]);
-		if (debug){
-			Serial << F("IBAT :") << inm[canalI] << endl;
-		}
-	}
-	else if (valeur == CMD_READ_IAM){
-		int t = now();
-		int minut = minute(t);						// index minute actuelle
-		I2C_writeAnything (iam[minut]);
-		if (debug){
-			Serial << F("IAM :") << iam[minut] << endl;
-		}
-	}
-	else if (valeur == CMD_READ_IAH){
-		int heure = hour() ;
-		I2C_writeAnything (iah[heure]);
-		if (debug){
-			Serial << F("IAH :") << iah[heure] << endl;
-		}
-	}
-	else if (valeur == CMD_READ_CUMULIA){
-		I2C_writeAnything (config.val.cumuliahg);
-		if (debug){
-			Serial << F("CUMUL :") << config.val.cumuliahg << endl;
-		}
-	}
-} // end of send_ia
 
 void print_title (){
 	Serial.println();
@@ -516,8 +439,6 @@ void setup(){
 	command = 0;		// commande provenant i2c
 	pinMode(ledPin, OUTPUT);
 	digitalWrite(ledPin, HIGH);		// turn the LED on (HIGH is the voltage level)
-	pinMode(cdePin, OUTPUT);
-	digitalWrite(cdePin, LOW);		// turn the LED on (HIGH is the voltage level)
 	Serial.begin(BAUD_RATE);		// initialize serial:
 	print_title () ;
 	setSyncProvider(RTC.get);
@@ -594,11 +515,6 @@ void setup(){
 	}
 
 	//initialisation arrays
-	Wire.begin (MY_ADDRESS);
-	Wire.onReceive (receiveEvent);	// interrupt handler for incoming messages
-	Wire.onRequest (requestEvent);	// interrupt handler for when data is wanted
-
-	Serial << F("i2c en reception port :") << MY_ADDRESS << endl;
 	Serial.print(F("attente 1 minute d acquisitions\n"));
 	time_t t;
 	do{
