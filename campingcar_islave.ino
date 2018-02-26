@@ -38,13 +38,14 @@
 		*	0.3.0 - ajout de la variable cumul instantané; cumul(s) en pascan * 60
 		*	0.4.0 - mise en sram des variables de cumul
 		*	0.4.1 - resolution de cumul * 60
-M		*	0.4.2 - correction lecture eeprom et setup demarrage minute pleine
-d		*	0.4.3 - suppression des adherences wire
+		*	0.4.2 - correction lecture eeprom et setup demarrage minute pleine
+		*	0.4.3 - suppression des adherences wire
+Md		*	0.5.0 - softwareserial(tx) utilise pour debug/enregistrement
 	*/
 
 // programme :
 const char title[] = "Acq_data_I-stat";
-const char version[] = "0.4.3";
+const char version[] = "0.5.0";
 
 #include <Arduino.h>
 #include <string.h>
@@ -55,6 +56,8 @@ const char version[] = "0.4.3";
 #include <Streaming.h>        //http://arduiniana.org/libraries/streaming/
 #include <EEPROM.h>
 #include "EEPROMAnything.h"
+#include <SendOnlySoftwareSerial.h>
+
 
 using namespace std;
 
@@ -62,7 +65,7 @@ using namespace std;
 	#define rx		D0			// tty
 	#define tx		D1			// tty
 	#define 		D2			//
-	#define 		D3			//
+	#define 		D3			// tx debug/enregistrement
 	#define 		D4			//
 	#define 		D5			//
 	#define 		D6			//
@@ -149,20 +152,11 @@ int iam[60] = {0};				// courant moyen / minute pour calculer la moyenne glissan
 int iah[24] = {0};					// courant moyen glissant en ampere/heure
 long iamsigma = 0 ;				// somme des puissances/minutes
 bool init0 = false;
+
 Timer timber;
+SendOnlySoftwareSerial SerialDebug (3);  // Tx pin
 
 // various commands we might get
-
-enum {
-	CMD_LIST_LENGTH = 1,
-	CMD_LIST = 2,
-	CMD_READ_VBAT = 3,
-	CMD_READ_IBAT = 4,
-	CMD_READ_IAM = 5,
-	CMD_READ_IAH = 6,
-	CMD_READ_CUMULIA = 7,
-	CMD_ID = 9
-	};
 
 union mesure
 	{
@@ -171,8 +165,6 @@ union mesure
 		unsigned long lval ;
 		float fval ;
 	} valeur ;
-
-char command;
 
 //			****	sous programmes		****
 
@@ -318,10 +310,13 @@ void print2serial(char *bfr, int iam, int iah){
 	// impression de la date et heure
 	Serial.print(bfr) ;
 	Serial.print(F(",")) ;
+	SerialDebug.print(bfr) ;
+	SerialDebug.print(F(",")) ;
 	// impression mesures des capteurs
 	
 	for(int i=0;i<=CAPTEUR_COUNT-1;i++){
 		Serial << map(inm[i], capteurs[i].MIN_can, capteurs[i].MAX_can, capteurs[i].analog_MIN_elec, capteurs[i].analog_MAX_elec) << F(",");
+		SerialDebug << map(inm[i], capteurs[i].MIN_can, capteurs[i].MAX_can, capteurs[i].analog_MIN_elec, capteurs[i].analog_MAX_elec) << F(",");
 	}
 	/** impression sommes des acquisitions minutes glissantes
 	Serial.print(map(iamsigma , 0, 61380, analog_IMIN[1], analog_IMAX[1]) ); 
@@ -331,10 +326,14 @@ void print2serial(char *bfr, int iam, int iah){
 	Serial.print(F(",")) ;**/
 	// impression moyenne glissante du courant sur 60 minutes
 	Serial << map(iah , capteurs[canalI].MIN_can, capteurs[canalI].MAX_can, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec) << F(",");
+	SerialDebug << map(iah , capteurs[canalI].MIN_can, capteurs[canalI].MAX_can, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec) << F(",");
 	//impression du cumul de capacité
 	Serial << map((config.val.cumuliahg / 60) , capteurs[canalI].MIN_can, capteurs[canalI].MAX_can, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec) << F(",");
+	SerialDebug << map((config.val.cumuliahg / 60) , capteurs[canalI].MIN_can, capteurs[canalI].MAX_can, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec) << F(",");
 	Serial << map((config.val.cumuliah / 60) , capteurs[canalI].MIN_can, capteurs[canalI].MAX_can, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec) << F(",");
+	SerialDebug << map((config.val.cumuliah / 60) , capteurs[canalI].MIN_can, capteurs[canalI].MAX_can, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec) << F(",");
 	Serial << map((config.val.cumuliaht / 60) , capteurs[canalI].MIN_can, capteurs[canalI].MAX_can, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec) << F("\n");
+	SerialDebug << map((config.val.cumuliaht / 60) , capteurs[canalI].MIN_can, capteurs[canalI].MAX_can, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec) << F("\n");
 	//Serial.print(F("freeRam : ")); 
 	//Serial.println(freeRam()); 
 }// end of print2serial
@@ -436,10 +435,10 @@ uint16_t getchksum() {
 
 void setup(){
 
-	command = 0;		// commande provenant i2c
 	pinMode(ledPin, OUTPUT);
 	digitalWrite(ledPin, HIGH);		// turn the LED on (HIGH is the voltage level)
 	Serial.begin(BAUD_RATE);		// initialize serial:
+	SerialDebug.begin(BAUD_RATE);	// initialize serialdebug:
 	print_title () ;
 	setSyncProvider(RTC.get);
 	if (timeStatus() != timeSet){
