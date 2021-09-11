@@ -1,7 +1,7 @@
 	/*
 	- mesure des courants des modules a effet hall
 	- timer toutes les 20 secondes
-	- à disposition du processeur maitre via i2c  
+	- à disposition du processeur maitre via i2c
 	- envoi des donnees de debug liaison serie en bluetooth
 	*/
 
@@ -16,7 +16,7 @@
 		* 	0.0.7 - envoi de donnee modele csv
 		* 	0.0.8 - envoi de float sur wire
 		* 	0.0.9 - correction A/h au lieu de W/h
-		* 	0.0.10 - conversion float en long 
+		* 	0.0.10 - conversion float en long
 		* 	0.0.11 - retour au float
 		* 	0.0.12 - calcul moyennes en pas CAN
 		* 	0.0.13 - commande frigo elect si reception i2c[8]
@@ -24,13 +24,13 @@
 -------------scission programme désulfate en pas can-------------------------------------------------
 		* 	0.0.1 - re-ecriture du programme de mesure de courant V0.0.13
 		* 	0.0.2 - ajustement des calculs de mesure en mv ! memoire insufisante sdcard
-		* 	0.0.3 - stats de mesure en pas can 
-		* 	0.0.4 - suppression enregistrement sdcard 
+		* 	0.0.3 - stats de mesure en pas can
+		* 	0.0.4 - suppression enregistrement sdcard
 		* 	0.0.5 - initialisation des moyennes (heure et 24 heures) à la valeur de la 1ere mesure
 		* 	achat chargeur de batterie;
 		* 	modification de la carte suppression de la commande de puissance du frigo
 -------------fusion programme désulfate en pas can-------------------------------------------------
-		* 	0.1.0 - integation des modifications 
+		* 	0.1.0 - integation des modifications
 		*	0.1.2 - version print valeur en debug
 		*	0.2.0 - mise en eeprom des parametres
 		*	0.2.1 - mesure courant d'instrumentation
@@ -40,19 +40,20 @@
 		*	0.4.1 - resolution de cumul * 60
 		*	0.4.2 - correction lecture eeprom et setup demarrage minute pleine
 		*	0.4.3 - suppression des adherences wire
-Md		*	0.5.0 - softwareserial(tx) utilise pour debug/enregistrement
+		*	0.5.0 - softwareserial(tx) utilise pour debug/enregistrement
+Md		*	0.5.1 - correction bug setrtc
 	*/
 
 // programme :
 const char title[] = "Acq_data_I-stat";
-const char version[] = "0.5.0";
+const char version[] = "0.5.1";
 
 #include <Arduino.h>
 #include <string.h>
 #include <I2C_Anything.h>
 #include "Timer.h"
 #include <DS3232RTC.h>    //http://github.com/JChristensen/DS3232RTC
-#include <Time.h>         //http://www.arduino.cc/playground/Code/Time  
+#include <Time.h>         //http://www.arduino.cc/playground/Code/Time
 #include <Streaming.h>        //http://arduiniana.org/libraries/streaming/
 #include <EEPROM.h>
 #include "EEPROMAnything.h"
@@ -107,8 +108,8 @@ const int default_ANA1[] = { -30000, 30000, -512, 512, 0, 100} ;
 const int default_ANA2[] = { -11000, 11000, -512, 512, -34, 100} ;
 const int default_cumul[] = { 4655, 4655, 4655, 4655} ;
 
-long maxcumul = 279300 ;		// valeur d ecretage du cumul => 100ah => 4654pascan x 60mn
-//long cumuliahg = 0 ;		// cumul energie moyenne glissante ecrete 
+long maxcumul = 279300 ;	// valeur d ecretage du cumul => 100ah => 4654pascan x 60mn; (512 / 11 = 46.54pascan/A)
+//long cumuliahg = 0 ;		// cumul energie moyenne glissante ecrete
 //long cumuliah = 0 ;		// cumul energie instantannée 60mn ecrete init 6000 = 100ah x 60
 //long cumuliaht = 0 ;		// cumul total non ecreté
 
@@ -147,10 +148,10 @@ const char* ia_name[2] = {"Am", "Ah" } ; //, "1ia_Min", "1iaH_moy"};
 // Variables :
 bool debug = false ;   					// mode debug
 bool sflag = false ;   					// caractere 's' reçu => mise a l heure
-int inm[ CAPTEUR_COUNT ] ;		// registre stat de data minute : moyenne ( cumul / s_freq )
-int iam[60] = {0};				// courant moyen / minute pour calculer la moyenne glissante
-int iah[24] = {0};					// courant moyen glissant en ampere/heure
-long iamsigma = 0 ;				// somme des puissances/minutes
+int inm[ CAPTEUR_COUNT ] ;				// registre stat de data minute : moyenne ( cumul / s_freq )
+int iam[60] = {0};						// courant moyen / minute pour calculer la moyenne glissante
+int iah[24] = {0};						// courant moyen glissant en ampere/heure
+long iamsigma = 0 ;						// somme des puissances/minutes
 bool init0 = false;
 
 Timer timber;
@@ -161,7 +162,7 @@ SendOnlySoftwareSerial SerialDebug (3);  // Tx pin
 union mesure
 	{
 		byte bval[4] ;
-		unsigned int ival[2] ; 
+		unsigned int ival[2] ;
 		unsigned long lval ;
 		float fval ;
 	} valeur ;
@@ -174,7 +175,7 @@ int freeRam () {
 	extern int __heap_start, *__brkval;
 	int v;
 	return (int) &v - (__brkval == 0 ? (int) &__heap_start : (int) __brkval);
-} // end of freeRam 
+} // end of freeRam
 
 void ana_get(){			// acquisition analogiques
 	for(int i=0;i<=CAPTEUR_COUNT-1;i++){
@@ -182,13 +183,13 @@ void ana_get(){			// acquisition analogiques
 		if(debug){
 			Serial << val << F(" | ");
 		}
-		
+
 		// valeur mesuree en pascan X par le gain
 		val = (val * capteurs[i].gain) / 100 ;
 		if(debug){
 			Serial << val << F(" | ");
 		}
-		
+
 		// recallage du CAN arduino avec echelle en eeprom
 		val = map( val , 0, 1024, (capteurs[i].MIN_can), (capteurs[i].MAX_can));
 		val += capteurs[i].offset;
@@ -196,26 +197,26 @@ void ana_get(){			// acquisition analogiques
 		if(debug){
 			Serial << val << F(" | ") << map(val , capteurs[i].MIN_can, capteurs[i].MAX_can, capteurs[i].analog_MIN_elec, capteurs[i].analog_MAX_elec) << endl;
 		}
-		
+
 	}
-	
-} // end of ana_get 
+
+} // end of ana_get
 
 /** Mesure entree ANA avec la référence interne à 1.1 volts */
 unsigned int analogReadPin(byte pin) {
 
 	/** Sélectionne l entee ADC avec la référence interne à 1.1 volts */
 	//ADMUX = bit (REFS0) | bit (REFS1)  | pin;    // input pin
-	//ADMUX =   bit (REFS0) | (pin & 0x07);  // AVcc 
+	//ADMUX =   bit (REFS0) | (pin & 0x07);  // AVcc
 	/** Sélectionne l entee ADC  */
 	ADMUX = bit (REFS0) | pin ;    // input pin
 	delay (200);  // let it stabilize
 
 	/** clear prescaler bits**/
-	ADCSRA &= ~(bit (ADPS0) | bit (ADPS1) | bit (ADPS2)); 
+	ADCSRA &= ~(bit (ADPS0) | bit (ADPS1) | bit (ADPS2));
 	/** Activation du prescaler**/
 	//ADCSRA |= bit (ADPS0) | bit (ADPS2);                 //  32
-	ADCSRA |= bit (ADPS1) | bit (ADPS2);                 //  64 
+	ADCSRA |= bit (ADPS1) | bit (ADPS2);                 //  64
 	/** Active le convertisseur analogique -> numérique **/
 	ADCSRA |= (1 << ADEN);
 	/** Lance une conversion analogique -> numérique **/
@@ -224,7 +225,7 @@ unsigned int analogReadPin(byte pin) {
 	while(ADCSRA & (1 << ADSC));
 	/** Récupère le résultat de la conversion **/
 	return ADCL | (ADCH << 8);
-} // end of analogReadPin 
+} // end of analogReadPin
 
 void set_rtcTime(){		//set rtc time
 	//check for input to set the RTC, minimum length is 12, i.e. yy,m,d,h,m,s
@@ -243,27 +244,27 @@ void set_rtcTime(){		//set rtc time
 		}
 		else {		//(y < 100)
 			tm.Year = y2kYearToTm(y);
-			tm.Month = Serial.parseInt();
-			tm.Day = Serial.parseInt();
-			tm.Hour = Serial.parseInt();
-			tm.Minute = Serial.parseInt();
-			tm.Second = Serial.parseInt();
-			t = makeTime(tm);
-			RTC.set(t);        //use the time_t value to ensure correct weekday is set
-			setTime(t);
-			char buffer[20] ;
-			char* bfr = buffer ;
-			digitalClockDisplay (bfr) ;
-			Serial.print(buffer) ;
-			Serial << endl;
-			//dump any extraneous input
-			while (Serial.available() > 0) Serial.read();
 		}
+		tm.Month = Serial.parseInt();
+		tm.Day = Serial.parseInt();
+		tm.Hour = Serial.parseInt();
+		tm.Minute = Serial.parseInt();
+		tm.Second = Serial.parseInt();
+		t = makeTime(tm);
+		RTC.set(t);        //use the time_t value to ensure correct weekday is set
+		setTime(t);
+		char buffer[20] ;
+		char* bfr = buffer ;
+		digitalClockDisplay (bfr) ;
+		Serial.print(buffer) ;
+		Serial << endl;
+		//dump any extraneous input
+		while (Serial.available() > 0) Serial.read();
 	}
 } // end of set_rtcTime
 
 byte get_list(char *liste){		//get list of variables
-	
+
 	for(int i= 0;i<=CAPTEUR_COUNT-1;i++){
 		strcat(liste, analog_name[i]);
 		strcat(liste, ",");
@@ -304,22 +305,22 @@ void print_title (){
 
 void print2serial(char *bfr, int iam, int iah){
 
-	//Serial.print(F("freeRam : ")); 
+	//Serial.print(F("freeRam : "));
 	//Serial.println(freeRam());
-	
+
 	// impression de la date et heure
 	Serial.print(bfr) ;
 	Serial.print(F(",")) ;
 	SerialDebug.print(bfr) ;
 	SerialDebug.print(F(",")) ;
 	// impression mesures des capteurs
-	
+
 	for(int i=0;i<=CAPTEUR_COUNT-1;i++){
 		Serial << map(inm[i], capteurs[i].MIN_can, capteurs[i].MAX_can, capteurs[i].analog_MIN_elec, capteurs[i].analog_MAX_elec) << F(",");
 		SerialDebug << map(inm[i], capteurs[i].MIN_can, capteurs[i].MAX_can, capteurs[i].analog_MIN_elec, capteurs[i].analog_MAX_elec) << F(",");
 	}
 	/** impression sommes des acquisitions minutes glissantes
-	Serial.print(map(iamsigma , 0, 61380, analog_IMIN[1], analog_IMAX[1]) ); 
+	Serial.print(map(iamsigma , 0, 61380, analog_IMIN[1], analog_IMAX[1]) );
 	Serial.print(F(",")) ;
 	// impression courant instantané minute -- impression initile => copie inm[1]
 	Serial.print( map(iam , -512, 511, capteurs[i].MIN_can, capteurs[i].MAX_can) );
@@ -334,8 +335,8 @@ void print2serial(char *bfr, int iam, int iah){
 	SerialDebug << map((config.val.cumuliah / 60) , capteurs[canalI].MIN_can, capteurs[canalI].MAX_can, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec) << F(",");
 	Serial << map((config.val.cumuliaht / 60) , capteurs[canalI].MIN_can, capteurs[canalI].MAX_can, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec) << F("\n");
 	SerialDebug << map((config.val.cumuliaht / 60) , capteurs[canalI].MIN_can, capteurs[canalI].MAX_can, capteurs[canalI].analog_MIN_elec, capteurs[canalI].analog_MAX_elec) << F("\n");
-	//Serial.print(F("freeRam : ")); 
-	//Serial.println(freeRam()); 
+	//Serial.print(F("freeRam : "));
+	//Serial.println(freeRam());
 }// end of print2serial
 
 /**
@@ -346,6 +347,7 @@ void print2serial(char *bfr, int iam, int iah){
 	int offset ;			// offset pascan conpensation ecart a 0amp
 	int gain ;				// * gain de correction ana / 100  (voie courant negative)
 **/
+
 void print_code_integer(int index){
 	if (index ==0){Serial.print(F("ID EEPROM = ")) ;}
 	else if (index ==1){Serial.print("analog_MIN_elec_0 = ") ;}
@@ -413,7 +415,7 @@ int EEPROMAnythingWrite(int pos, char *zeichen, int lenge){
 	}
 	return pos + lenge;
 }
- 
+
 // Read any data structure or variable from EEPROM
 int EEPROMAnythingRead(int pos, char *zeichen, int lenge){
 	for (int i = 0; i < lenge; i++){
@@ -430,7 +432,7 @@ uint16_t getchksum() {
 	}
 	return sum;
 }
- 
+
 //			****	fin des sous programmes		****
 
 void setup(){
@@ -503,7 +505,7 @@ void setup(){
 		rc = EEPROM_writeAnything(addr, default_ANA2);
 		Serial << F("copie EEPROM valeurs default_ANA2 ") << rc << " octets"<< endl;
 		addr = addr + sizeof(default_ANA2);
-		
+
 		memcpy ( &capteurs[0].analog_MIN_elec, &default_ANA0, sizeof(default_ANA0) );
 		memcpy ( &capteurs[1].analog_MIN_elec, &default_ANA1, sizeof(default_ANA1) );
 		memcpy ( &capteurs[2].analog_MIN_elec, &default_ANA2, sizeof(default_ANA2) );
@@ -522,7 +524,7 @@ void setup(){
 		}
 		ana_get() ;	// uncoup pour rire
 		iamsigma = 0;
-		for(int j=0;j<=59;j++){			// raz de la moyenne glissante de puissance 
+		for(int j=0;j<=59;j++){			// raz de la moyenne glissante de puissance
 			iam [j] = analog_value[canalI] ;
 			iamsigma += analog_value[canalI] ;
 		}
@@ -610,11 +612,11 @@ void loop(void){
 				char *bfr = buffer ;
 				digitalClockDisplay (bfr) ;
 				print2serial(bfr, iam[minut], iah[heure]);
-				//Serial.print(F("freeRam : ")); 
-				//Serial.println(freeRam()); 
+				//Serial.print(F("freeRam : "));
+				//Serial.println(freeRam());
 			}
 		}
-		
+
 		timber.update();	// mise à jour du timer*/
 	}
 } // end of loop
