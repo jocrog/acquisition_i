@@ -252,14 +252,15 @@ void set_rtcTime(){		//set rtc time
 		tm.Second = Serial.parseInt();
 		t = makeTime(tm);
 		RTC.set(t);        //use the time_t value to ensure correct weekday is set
-		setTime(t);
+		resetFunc() ;  //call reset
+		/*setTime(t);
 		char buffer[20] ;
 		char* bfr = buffer ;
 		digitalClockDisplay (bfr) ;
 		Serial.print(buffer) ;
-		Serial << endl;
+		Serial << endl;*/
 		//dump any extraneous input
-		while (Serial.available() > 0) Serial.read();
+		//while (Serial.available() > 0) Serial.read();
 	}
 } // end of set_rtcTime
 
